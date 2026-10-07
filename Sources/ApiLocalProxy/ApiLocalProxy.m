@@ -196,6 +196,40 @@ static NSData *read_request(int fd,
     return received;
 }
 
+static BOOL is_localhost_target(NSURL *url) {
+    if (url == nil) {
+        return NO;
+    }
+
+    return [url.host.lowercaseString isEqualToString:@"127.0.0.1"] &&
+           url.port.integerValue == kLocalPort;
+}
+
+static void run_api_hook_rewrite_diagnostic(void) {
+    NSURL *original =
+        [NSURL URLWithString:@"https://api.link-like-lovelive.app/__LLL_REWRITE_TEST__"];
+
+    NSURLRequest *request =
+        [NSURLRequest requestWithURL:original];
+
+    NSURL *result = request.URL;
+    NSString *resultText = result.absoluteString ?: @"<nil>";
+
+    if (is_localhost_target(result)) {
+        show_status(@"LLL API REWRITE ACTIVE\n127.0.0.1:17891");
+        NSLog(@"[LLLLOffline][DIAG] ApiHook rewrite PASS: %@ -> %@",
+              original.absoluteString,
+              resultText);
+    } else {
+        show_status(
+            [NSString stringWithFormat:@"LLL API REWRITE FAIL\n%@", resultText]
+        );
+        NSLog(@"[LLLLOffline][DIAG] ApiHook rewrite FAIL: %@ -> %@",
+              original.absoluteString,
+              resultText);
+    }
+}
+
 static void send_http_response(int fd,
                                NSInteger status,
                                NSString *reason,
@@ -448,12 +482,14 @@ static void *server_thread(void *unused) {
 
     if (listen(serverFD, 16) != 0) {
         NSLog(@"[LLLLOffline][API] listen failed: %s", strerror(errno));
+        show_status(@"LLL PROXY LISTEN FAIL");
         close(serverFD);
         return NULL;
     }
 
     NSLog(@"[LLLLOffline][API] listening on 127.0.0.1:%u",
           (unsigned)kLocalPort);
+    show_status(@"LLL PROXY BOUND\n127.0.0.1:17891");
 
     for (;;) {
         int clientFD = accept(serverFD, NULL, NULL);
@@ -507,7 +543,13 @@ static void start_proxy_once(void) {
 
     if (pthread_create(&thread, NULL, server_thread, NULL) == 0) {
         (void)pthread_detach(thread);
-        show_status(@"LLL API LOCAL PROXY READY");
+
+        dispatch_after(
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+            dispatch_get_main_queue(), ^{
+                show_status(@"LLL API LOCAL PROXY READY");
+                run_api_hook_rewrite_diagnostic();
+            });
     } else {
         show_status(@"LLL API PROXY START FAIL");
     }
