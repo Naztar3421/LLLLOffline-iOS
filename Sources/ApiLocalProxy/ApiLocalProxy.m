@@ -16,39 +16,96 @@ static NSString * const kLocalHost = @"127.0.0.1";
 static const uint16_t kLocalPort = 17891;
 static NSString * const kUpstreamBase = @"https://api-alfa-l4.hasu-link.club";
 
-static void show_status(NSString *status) {
+static UIWindow *gDiagWindow = nil;
+static UILabel *gDiagLabel = nil;
+static BOOL gBindPass = NO;
+static BOOL gSelfTestPass = NO;
+static BOOL gRewritePass = NO;
+static NSUInteger gGameHitCount = 0;
+static NSString *gLastPath = @"-";
+static NSString *gLastEvent = @"STARTING";
+
+static void diag_refresh_main(void) {
+    if (gDiagWindow == nil) {
+        gDiagWindow = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+        gDiagWindow.windowLevel = UIWindowLevelAlert + 1;
+
+        UIViewController *controller = [UIViewController new];
+        controller.view.backgroundColor = UIColor.clearColor;
+        gDiagWindow.rootViewController = controller;
+    }
+
+    if (gDiagLabel == nil) {
+        gDiagLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 36, 359, 144)];
+        gDiagLabel.textAlignment = NSTextAlignmentLeft;
+        gDiagLabel.numberOfLines = 0;
+        gDiagLabel.font = [UIFont boldSystemFontOfSize:12.0];
+        gDiagLabel.textColor = UIColor.whiteColor;
+        gDiagLabel.backgroundColor =
+            [UIColor colorWithRed:0.08 green:0.08 blue:0.08 alpha:0.94];
+        gDiagLabel.layer.cornerRadius = 10.0;
+        gDiagLabel.clipsToBounds = YES;
+        [gDiagWindow.rootViewController.view addSubview:gDiagLabel];
+    }
+
+    NSString *bind = gBindPass ? @"PASS" : @"WAIT";
+    NSString *selfTest = gSelfTestPass ? @"PASS" : @"WAIT";
+    NSString *rewrite = gRewritePass ? @"PASS" : @"WAIT";
+
+    gDiagLabel.text =
+        [NSString stringWithFormat:
+            @"LLL API LOCAL DIAGNOSTIC\n"
+             @"BIND     %@   127.0.0.1:17891\n"
+             @"SELFTEST %@   /__LLL_SELFTEST__\n"
+             @"REWRITE  %@   api.link-like-lovelive.app\n"
+             @"GAME HIT %lu\n"
+             @"LAST     %@\n"
+             @"EVENT    %@",
+            bind, selfTest, rewrite,
+            (unsigned long)gGameHitCount,
+            gLastPath ?: @"-",
+            gLastEvent ?: @"-"];
+
+    gDiagWindow.hidden = NO;
+}
+
+static void diag_set_event(NSString *event) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        static UIWindow *window = nil;
+        gLastEvent = [event copy] ?: @"-";
+        diag_refresh_main();
+    });
+}
 
-        if (window == nil) {
-            window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-            window.windowLevel = UIWindowLevelAlert + 1;
+static void diag_set_bind(BOOL pass, NSString *event) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gBindPass = pass;
+        gLastEvent = [event copy] ?: @"-";
+        diag_refresh_main();
+    });
+}
 
-            UIViewController *controller = [UIViewController new];
-            controller.view.backgroundColor = UIColor.clearColor;
-            window.rootViewController = controller;
-        }
+static void diag_set_selftest(BOOL pass, NSString *event) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gSelfTestPass = pass;
+        gLastEvent = [event copy] ?: @"-";
+        diag_refresh_main();
+    });
+}
 
-        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(8, 42, 359, 78)];
-        label.text = status ?: @"";
-        label.textAlignment = NSTextAlignmentCenter;
-        label.numberOfLines = 3;
-        label.font = [UIFont boldSystemFontOfSize:13.0];
-        label.textColor = UIColor.whiteColor;
-        label.backgroundColor = [UIColor colorWithRed:0.1 green:0.6 blue:0.2 alpha:0.92];
-        label.layer.cornerRadius = 10.0;
-        label.clipsToBounds = YES;
+static void diag_set_rewrite(BOOL pass, NSString *event) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gRewritePass = pass;
+        gLastEvent = [event copy] ?: @"-";
+        diag_refresh_main();
+    });
+}
 
-        [window.rootViewController.view addSubview:label];
-        window.hidden = NO;
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [label removeFromSuperview];
-            if (window.rootViewController.view.subviews.count == 0) {
-                window.hidden = YES;
-            }
-        });
+static void diag_record_game_hit(NSString *path) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gGameHitCount += 1;
+        gLastPath = [path copy] ?: @"/";
+        gLastEvent = [NSString stringWithFormat:@"GAME HIT %@", gLastPath];
+        diag_refresh_main();
     });
 }
 
@@ -216,13 +273,14 @@ static void run_api_hook_rewrite_diagnostic(void) {
     NSString *resultText = result.absoluteString ?: @"<nil>";
 
     if (is_localhost_target(result)) {
-        show_status(@"LLL API REWRITE ACTIVE\n127.0.0.1:17891");
+        diag_set_rewrite(YES, @"REWRITE PASS -> 127.0.0.1:17891");
         NSLog(@"[LLLLOffline][DIAG] ApiHook rewrite PASS: %@ -> %@",
               original.absoluteString,
               resultText);
     } else {
-        show_status(
-            [NSString stringWithFormat:@"LLL API REWRITE FAIL\n%@", resultText]
+        diag_set_rewrite(
+            NO,
+            [NSString stringWithFormat:@"REWRITE FAIL -> %@", resultText]
         );
         NSLog(@"[LLLLOffline][DIAG] ApiHook rewrite FAIL: %@ -> %@",
               original.absoluteString,
@@ -351,9 +409,7 @@ static void proxy_request(int clientFD,
 
     NSString *path = upstream.URL.path ?: @"/";
 
-    show_status(
-        [NSString stringWithFormat:@"LLL API LOCAL HIT\n%@", path]
-    );
+    diag_record_game_hit(path);
 
     NSLog(@"[LLLLOffline][API] LOCAL -> %@", upstream.URL.absoluteString);
 
@@ -437,15 +493,72 @@ static void proxy_request(int clientFD,
         responseHeaders
     );
 
-    show_status(
-        [NSString stringWithFormat:@"LLL API UPSTREAM %ld\n%@",
-         (long)response.statusCode,
-         path]
+    diag_set_event(
+        [NSString stringWithFormat:@"UPSTREAM %ld %@",
+         (long)response.statusCode, path]
     );
 
     NSLog(@"[LLLLOffline][API] PRIVATE -> GAME status=%ld bytes=%lu",
           (long)response.statusCode,
           (unsigned long)responseData.length);
+}
+
+static void run_local_selftest(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        diag_set_selftest(NO, @"SELFTEST SOCKET FAIL");
+        return;
+    }
+
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(kLocalPort);
+
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+        diag_set_selftest(
+            NO,
+            [NSString stringWithFormat:@"SELFTEST CONNECT FAIL (%s)", strerror(errno)]
+        );
+        close(fd);
+        return;
+    }
+
+    const char request[] =
+        "GET /__LLL_SELFTEST__ HTTP/1.1\r\n"
+        "Host: 127.0.0.1:17891\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+
+    ssize_t sent = send(fd, request, sizeof(request) - 1, 0);
+    if (sent <= 0) {
+        diag_set_selftest(NO, @"SELFTEST SEND FAIL");
+        close(fd);
+        return;
+    }
+
+    char response[1024];
+    memset(response, 0, sizeof(response));
+    ssize_t received = recv(fd, response, sizeof(response) - 1, 0);
+    close(fd);
+
+    if (received > 0 &&
+        strstr(response, "HTTP/1.1 200") != NULL &&
+        strstr(response, "LLL_SELFTEST_OK") != NULL) {
+        diag_set_selftest(YES, @"SELFTEST PASS");
+    } else {
+        NSString *snippet =
+            received > 0
+            ? [[NSString alloc] initWithBytes:response
+                                       length:(NSUInteger)received
+                                     encoding:NSUTF8StringEncoding]
+            : @"<no response>";
+        diag_set_selftest(
+            NO,
+            [NSString stringWithFormat:@"SELFTEST RESP FAIL %@", snippet ?: @"<invalid>"]
+        );
+    }
 }
 
 static void *server_thread(void *unused) {
@@ -482,14 +595,14 @@ static void *server_thread(void *unused) {
 
     if (listen(serverFD, 16) != 0) {
         NSLog(@"[LLLLOffline][API] listen failed: %s", strerror(errno));
-        show_status(@"LLL PROXY LISTEN FAIL");
+        diag_set_bind(NO, @"LISTEN FAIL");
         close(serverFD);
         return NULL;
     }
 
     NSLog(@"[LLLLOffline][API] listening on 127.0.0.1:%u",
           (unsigned)kLocalPort);
-    show_status(@"LLL PROXY BOUND\n127.0.0.1:17891");
+    diag_set_bind(YES, @"BIND PASS");
 
     for (;;) {
         int clientFD = accept(serverFD, NULL, NULL);
@@ -513,6 +626,31 @@ static void *server_thread(void *unused) {
             continue;
         }
 
+        NSArray<NSString *> *parts =
+            [requestLine componentsSeparatedByString:@" "];
+
+        BOOL selfTestRequest =
+            parts.count >= 2 &&
+            [parts[0] isEqualToString:@"GET"] &&
+            [parts[1] isEqualToString:@"/__LLL_SELFTEST__"];
+
+        if (selfTestRequest) {
+            NSData *selfTestBody =
+                [@"LLL_SELFTEST_OK\n"
+                 dataUsingEncoding:NSUTF8StringEncoding];
+
+            send_http_response(
+                clientFD,
+                200,
+                @"OK",
+                selfTestBody,
+                @{@"Content-Type": @"text/plain; charset=utf-8"}
+            );
+
+            close(clientFD);
+            continue;
+        }
+
         NSUInteger headerEnd =
             find_header_end(received.bytes, received.length);
 
@@ -530,6 +668,13 @@ static void *server_thread(void *unused) {
                                received.length - headerEnd)]
             : [NSData data];
 
+        NSArray<NSString *> *requestParts =
+            [requestLine componentsSeparatedByString:@" "];
+
+        NSString *gamePath =
+            requestParts.count >= 2 ? requestParts[1] : @"/";
+
+        diag_record_game_hit(gamePath);
         proxy_request(clientFD, requestLine, headers, body);
         close(clientFD);
     }
@@ -544,14 +689,18 @@ static void start_proxy_once(void) {
     if (pthread_create(&thread, NULL, server_thread, NULL) == 0) {
         (void)pthread_detach(thread);
 
+        dispatch_async(dispatch_get_main_queue(), ^{
+            diag_refresh_main();
+        });
+
         dispatch_after(
             dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
             dispatch_get_main_queue(), ^{
-                show_status(@"LLL API LOCAL PROXY READY");
+                run_local_selftest();
                 run_api_hook_rewrite_diagnostic();
             });
     } else {
-        show_status(@"LLL API PROXY START FAIL");
+        diag_set_event(@"PROXY START FAIL");
     }
 }
 
