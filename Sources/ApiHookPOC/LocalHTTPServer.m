@@ -20,6 +20,11 @@ typedef NSURLSessionDataTask *(*TaskURLFn)(id, SEL, NSURL *);
 typedef NSURLSessionDataTask *(*TaskURLBlockFn)(id, SEL, NSURL *, void (^)(NSData *, NSURLResponse *, NSError *));
 typedef NSURLSessionDataTask *(*TaskRequestFn)(id, SEL, NSURLRequest *);
 typedef NSURLSessionDataTask *(*TaskRequestBlockFn)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *));
+typedef NSURLSessionUploadTask *(*UploadRequestDataFn)(id, SEL, NSURLRequest *, NSData *, void (^)(NSData *, NSURLResponse *, NSError *));
+typedef NSURLSessionUploadTask *(*UploadRequestFileFn)(id, SEL, NSURLRequest *, NSURL *, void (^)(NSData *, NSURLResponse *, NSError *));
+typedef NSURLSessionUploadTask *(*UploadRequestStreamFn)(id, SEL, NSURLRequest *);
+typedef NSURLSessionDownloadTask *(*DownloadRequestBlockFn)(id, SEL, NSURLRequest *, void (^)(NSURL *, NSURLResponse *, NSError *));
+typedef NSURLSessionDownloadTask *(*DownloadURLBlockFn)(id, SEL, NSURL *, void (^)(NSURL *, NSURLResponse *, NSError *));
 
 typedef id (*ReqWithURLFn)(id, SEL, NSURL *);
 typedef id (*ReqInitURLFn)(id, SEL, NSURL *);
@@ -34,6 +39,11 @@ static TaskURLFn g_forwardTaskURL = NULL;
 static TaskURLBlockFn g_forwardTaskURLBlock = NULL;
 static TaskRequestFn g_forwardTaskRequest = NULL;
 static TaskRequestBlockFn g_forwardTaskRequestBlock = NULL;
+static UploadRequestDataFn g_forwardUploadRequestData = NULL;
+static UploadRequestFileFn g_forwardUploadRequestFile = NULL;
+static UploadRequestStreamFn g_forwardUploadRequestStream = NULL;
+static DownloadRequestBlockFn g_forwardDownloadRequestBlock = NULL;
+static DownloadURLBlockFn g_forwardDownloadURLBlock = NULL;
 
 static ReqWithURLFn g_forwardReqWithURL = NULL;
 static ReqInitURLFn g_forwardReqInitURL = NULL;
@@ -167,6 +177,53 @@ static NSURLSessionDataTask *hookTaskRequestBlock(
 
     return g_forwardTaskRequestBlock != NULL
         ? g_forwardTaskRequestBlock(self, _cmd, request, completionHandler)
+        : nil;
+}
+
+static NSURLSessionUploadTask *hookUploadRequestData(
+    id self, SEL _cmd, NSURLRequest *request, NSData *bodyData,
+    void (^completionHandler)(NSData *, NSURLResponse *, NSError *)
+) {
+    observe_url(request.URL, @"NSURLSession.uploadRequest:data");
+    return g_forwardUploadRequestData != NULL
+        ? g_forwardUploadRequestData(self, _cmd, request, bodyData, completionHandler)
+        : nil;
+}
+
+static NSURLSessionUploadTask *hookUploadRequestFile(
+    id self, SEL _cmd, NSURLRequest *request, NSURL *fileURL,
+    void (^completionHandler)(NSData *, NSURLResponse *, NSError *)
+) {
+    observe_url(request.URL, @"NSURLSession.uploadRequest:file");
+    return g_forwardUploadRequestFile != NULL
+        ? g_forwardUploadRequestFile(self, _cmd, request, fileURL, completionHandler)
+        : nil;
+}
+
+static NSURLSessionUploadTask *hookUploadRequestStream(id self, SEL _cmd, NSURLRequest *request) {
+    observe_url(request.URL, @"NSURLSession.uploadRequest:stream");
+    return g_forwardUploadRequestStream != NULL
+        ? g_forwardUploadRequestStream(self, _cmd, request)
+        : nil;
+}
+
+static NSURLSessionDownloadTask *hookDownloadRequestBlock(
+    id self, SEL _cmd, NSURLRequest *request,
+    void (^completionHandler)(NSURL *, NSURLResponse *, NSError *)
+) {
+    observe_url(request.URL, @"NSURLSession.downloadRequest:block");
+    return g_forwardDownloadRequestBlock != NULL
+        ? g_forwardDownloadRequestBlock(self, _cmd, request, completionHandler)
+        : nil;
+}
+
+static NSURLSessionDownloadTask *hookDownloadURLBlock(
+    id self, SEL _cmd, NSURL *url,
+    void (^completionHandler)(NSURL *, NSURLResponse *, NSError *)
+) {
+    observe_url(url, @"NSURLSession.downloadURL:block");
+    return g_forwardDownloadURLBlock != NULL
+        ? g_forwardDownloadURLBlock(self, _cmd, url, completionHandler)
         : nil;
 }
 
@@ -338,6 +395,87 @@ static void install_all_hooks(void) {
                          @"dataTaskWithRequest:completionHandler:",
                          (IMP)hookTaskRequestBlock,
                          (IMP *)&g_forwardTaskRequestBlock);
+
+        install_instance(session,
+                         @"uploadTaskWithRequest:fromData:completionHandler:",
+                         (IMP)hookUploadRequestData,
+                         (IMP *)&g_forwardUploadRequestData);
+
+        install_instance(session,
+                         @"uploadTaskWithRequest:fromFile:completionHandler:",
+                         (IMP)hookUploadRequestFile,
+                         (IMP *)&g_forwardUploadRequestFile);
+
+        install_instance(session,
+                         @"uploadTaskWithStreamedRequest:",
+                         (IMP)hookUploadRequestStream,
+                         (IMP *)&g_forwardUploadRequestStream);
+
+        install_instance(session,
+                         @"downloadTaskWithRequest:completionHandler:",
+                         (IMP)hookDownloadRequestBlock,
+                         (IMP *)&g_forwardDownloadRequestBlock);
+
+        install_instance(session,
+                         @"downloadTaskWithURL:completionHandler:",
+                         (IMP)hookDownloadURLBlock,
+                         (IMP *)&g_forwardDownloadURLBlock);
+
+        /*
+         * NSURLSession uses concrete runtime classes (commonly __NSCFURLSession)
+         * for actual instances. Hook the class of a real shared session too.
+         */
+        NSURLSession *shared = [NSURLSession sharedSession];
+        Class concreteSession = object_getClass(shared);
+
+        if (concreteSession != Nil && concreteSession != session) {
+            NSLog(@"[LLLLOffline][OBSERVE] concrete NSURLSession class = %@", concreteSession);
+
+            install_instance(concreteSession,
+                             @"dataTaskWithURL:",
+                             (IMP)hookTaskURL,
+                             (IMP *)&g_forwardTaskURL);
+
+            install_instance(concreteSession,
+                             @"dataTaskWithURL:completionHandler:",
+                             (IMP)hookTaskURLBlock,
+                             (IMP *)&g_forwardTaskURLBlock);
+
+            install_instance(concreteSession,
+                             @"dataTaskWithRequest:",
+                             (IMP)hookTaskRequest,
+                             (IMP *)&g_forwardTaskRequest);
+
+            install_instance(concreteSession,
+                             @"dataTaskWithRequest:completionHandler:",
+                             (IMP)hookTaskRequestBlock,
+                             (IMP *)&g_forwardTaskRequestBlock);
+
+            install_instance(concreteSession,
+                             @"uploadTaskWithRequest:fromData:completionHandler:",
+                             (IMP)hookUploadRequestData,
+                             (IMP *)&g_forwardUploadRequestData);
+
+            install_instance(concreteSession,
+                             @"uploadTaskWithRequest:fromFile:completionHandler:",
+                             (IMP)hookUploadRequestFile,
+                             (IMP *)&g_forwardUploadRequestFile);
+
+            install_instance(concreteSession,
+                             @"uploadTaskWithStreamedRequest:",
+                             (IMP)hookUploadRequestStream,
+                             (IMP *)&g_forwardUploadRequestStream);
+
+            install_instance(concreteSession,
+                             @"downloadTaskWithRequest:completionHandler:",
+                             (IMP)hookDownloadRequestBlock,
+                             (IMP *)&g_forwardDownloadRequestBlock);
+
+            install_instance(concreteSession,
+                             @"downloadTaskWithURL:completionHandler:",
+                             (IMP)hookDownloadURLBlock,
+                             (IMP *)&g_forwardDownloadURLBlock);
+        }
     }
 
     if (request != Nil) {
@@ -462,7 +600,7 @@ static void *localhost_server_thread(void *unused) {
                     clientFD,
                     200,
                     "OK",
-                    "{\"offline\":true,\"service\":\"LLLLOffline-iOS-observer-v3\"}"
+                    "{\"offline\":true,\"service\":\"LLLLOffline-iOS-observer-v4\"}"
                 );
             } else {
                 send_response(
