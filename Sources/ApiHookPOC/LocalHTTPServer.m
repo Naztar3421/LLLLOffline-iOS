@@ -238,6 +238,25 @@ static NSURLSessionDownloadTask *hookDownloadURLBlock(
         : nil;
 }
 
+static void install_instance(
+    Class cls,
+    NSString *selectorName,
+    IMP replacement,
+    IMP *forward
+);
+static void install_concrete_override(
+    Class cls,
+    NSString *selectorName,
+    IMP replacement,
+    IMP *forward
+);
+static void install_class(
+    Class cls,
+    NSString *selectorName,
+    IMP replacement,
+    IMP *forward
+);
+
 static void install_tracked_session_instance_hooks(NSURLSession *session) {
     if (session == nil) {
         return;
@@ -547,7 +566,7 @@ static void *localhost_server_thread(void *unused) {
         ssize_t received = recv(clientFD, request, sizeof(request) - 1, 0);
 
         if (received > 0) {
-            request[received] = '\\0';
+            request[received] = '\0';
 
             if (strncmp(request, "GET /test ", 10) == 0) {
                 send_response(
@@ -608,7 +627,7 @@ static BOOL localhost_self_test(void) {
         return NO;
     }
 
-    response[received] = '\\0';
+    response[received] = '\0';
 
     return strstr(response, "200 OK") != NULL &&
            strstr(response, "\"offline\":true") != NULL;
