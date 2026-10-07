@@ -13,21 +13,36 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-static NSString * const kOfficialHost = @"api.link-like-lovelive.app";
-static NSString * const kPrivateHost = @"api-alfa-l4.hasu-link.club";
-
 static NSObject *g_observeLock = nil;
-static unsigned long g_apiCount = 0;
+static unsigned long g_hitCount = 0;
 
-typedef NSURLSessionDataTask *(*LLLDataTaskURLFn)(id, SEL, NSURL *);
-typedef NSURLSessionDataTask *(*LLLDataTaskURLBlockFn)(id, SEL, NSURL *, void (^)(NSData *, NSURLResponse *, NSError *));
-typedef NSURLSessionDataTask *(*LLLDataTaskRequestFn)(id, SEL, NSURLRequest *);
-typedef NSURLSessionDataTask *(*LLLDataTaskRequestBlockFn)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *));
+typedef NSURLSessionDataTask *(*TaskURLFn)(id, SEL, NSURL *);
+typedef NSURLSessionDataTask *(*TaskURLBlockFn)(id, SEL, NSURL *, void (^)(NSData *, NSURLResponse *, NSError *));
+typedef NSURLSessionDataTask *(*TaskRequestFn)(id, SEL, NSURLRequest *);
+typedef NSURLSessionDataTask *(*TaskRequestBlockFn)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *));
 
-static LLLDataTaskURLFn g_origDataTaskURL = NULL;
-static LLLDataTaskURLBlockFn g_origDataTaskURLBlock = NULL;
-static LLLDataTaskRequestFn g_origDataTaskRequest = NULL;
-static LLLDataTaskRequestBlockFn g_origDataTaskRequestBlock = NULL;
+typedef id (*ReqWithURLFn)(id, SEL, NSURL *);
+typedef id (*ReqInitURLFn)(id, SEL, NSURL *);
+typedef id (*ReqInitURLPolicyFn)(id, SEL, NSURL *, NSURLRequestCachePolicy, NSTimeInterval);
+typedef void (*SetURLFn)(id, SEL, NSURL *);
+
+typedef NSURL *(*URLWithStringFn)(id, SEL, NSString *);
+typedef NSURL *(*URLWithStringRelativeFn)(id, SEL, NSString *, NSURL *);
+typedef NSURL *(*URLWithStringEncodingFn)(id, SEL, NSString *, BOOL);
+
+static TaskURLFn g_forwardTaskURL = NULL;
+static TaskURLBlockFn g_forwardTaskURLBlock = NULL;
+static TaskRequestFn g_forwardTaskRequest = NULL;
+static TaskRequestBlockFn g_forwardTaskRequestBlock = NULL;
+
+static ReqWithURLFn g_forwardReqWithURL = NULL;
+static ReqInitURLFn g_forwardReqInitURL = NULL;
+static ReqInitURLPolicyFn g_forwardReqInitURLPolicy = NULL;
+static SetURLFn g_forwardSetURL = NULL;
+
+static URLWithStringFn g_forwardURLWithString = NULL;
+static URLWithStringRelativeFn g_forwardURLWithStringRelative = NULL;
+static URLWithStringEncodingFn g_forwardURLWithStringEncoding = NULL;
 
 static void show_status(NSString *status, BOOL success) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -42,11 +57,11 @@ static void show_status(NSString *status, BOOL success) {
             window.rootViewController = controller;
         }
 
-        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(10, 44, 355, 70)];
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(8, 42, 359, 76)];
         label.text = status ?: @"";
         label.textAlignment = NSTextAlignmentCenter;
         label.numberOfLines = 3;
-        label.font = [UIFont boldSystemFontOfSize:14.0];
+        label.font = [UIFont boldSystemFontOfSize:13.0];
         label.textColor = UIColor.whiteColor;
         label.backgroundColor = success
             ? [UIColor colorWithRed:0.1 green:0.6 blue:0.2 alpha:0.92]
@@ -57,7 +72,7 @@ static void show_status(NSString *status, BOOL success) {
         [window.rootViewController.view addSubview:label];
         window.hidden = NO;
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             [label removeFromSuperview];
             if (window.rootViewController.view.subviews.count == 0) {
@@ -67,159 +82,318 @@ static void show_status(NSString *status, BOOL success) {
     });
 }
 
-static BOOL is_api_host(NSString *host) {
-    if (host.length == 0) {
-        return NO;
-    }
-
-    NSString *lower = host.lowercaseString;
-    return [lower isEqualToString:kOfficialHost] ||
-           [lower isEqualToString:kPrivateHost];
-}
-
-static NSString *display_path_for_url(NSURL *url) {
+static NSString *compactURL(NSURL *url) {
     if (url == nil) {
         return @"<nil>";
     }
 
+    NSString *host = url.host ?: @"<no-host>";
     NSString *path = url.path.length > 0 ? url.path : @"/";
+
+    NSString *text = [NSString stringWithFormat:@"%@%@", host, path];
+
     if (url.query.length > 0) {
-        path = [path stringByAppendingFormat:@"?%@", url.query];
+        text = [text stringByAppendingFormat:@"?%@", url.query];
     }
 
-    return path;
+    if (text.length > 145) {
+        text = [[text substringToIndex:142] stringByAppendingString:@"..."];
+    }
+
+    return text;
 }
 
-static void observe_api_url(NSURL *url, NSString *source) {
-    if (url == nil || !is_api_host(url.host)) {
+static void observe_url(NSURL *url, NSString *source) {
+    if (url == nil) {
         return;
     }
 
-    unsigned long count = 0;
-    NSString *path = display_path_for_url(url);
+    NSString *shown = compactURL(url);
+    unsigned long count;
 
     @synchronized (g_observeLock) {
-        g_apiCount += 1;
-        count = g_apiCount;
+        if (g_hitCount >= 30) {
+            return;
+        }
+
+        g_hitCount += 1;
+        count = g_hitCount;
     }
 
-    NSLog(@"[LLLLOffline][OBSERVE] API #%lu %@ %@",
-          count,
-          source ?: @"URL",
-          url.absoluteString);
+    NSLog(@"[LLLLOffline][OBSERVE] HIT #%lu %@ %@", count, source, url.absoluteString);
 
-    show_status([NSString stringWithFormat:@"LLL API #%lu\n%@", count, path], YES);
+    show_status(
+        [NSString stringWithFormat:@"LLL URL HIT #%lu\n%@\n%@", count, source, shown],
+        YES
+    );
 }
 
-static void install_instance_hook_once(Class cls,
-                                        NSString *selectorName,
-                                        IMP replacement,
-                                        IMP *originalOut) {
-    SEL selector = NSSelectorFromString(selectorName);
-    Method method = class_getInstanceMethod(cls, selector);
+/*
+ * NSURLSession
+ */
+
+static NSURLSessionDataTask *hookTaskURL(id self, SEL _cmd, NSURL *url) {
+    observe_url(url, @"NSURLSession.URL");
+
+    return g_forwardTaskURL != NULL
+        ? g_forwardTaskURL(self, _cmd, url)
+        : nil;
+}
+
+static NSURLSessionDataTask *hookTaskURLBlock(
+    id self, SEL _cmd, NSURL *url,
+    void (^completionHandler)(NSData *, NSURLResponse *, NSError *)
+) {
+    observe_url(url, @"NSURLSession.URL:block");
+
+    return g_forwardTaskURLBlock != NULL
+        ? g_forwardTaskURLBlock(self, _cmd, url, completionHandler)
+        : nil;
+}
+
+static NSURLSessionDataTask *hookTaskRequest(id self, SEL _cmd, NSURLRequest *request) {
+    observe_url(request.URL, @"NSURLSession.request");
+
+    return g_forwardTaskRequest != NULL
+        ? g_forwardTaskRequest(self, _cmd, request)
+        : nil;
+}
+
+static NSURLSessionDataTask *hookTaskRequestBlock(
+    id self, SEL _cmd, NSURLRequest *request,
+    void (^completionHandler)(NSData *, NSURLResponse *, NSError *)
+) {
+    observe_url(request.URL, @"NSURLSession.request:block");
+
+    return g_forwardTaskRequestBlock != NULL
+        ? g_forwardTaskRequestBlock(self, _cmd, request, completionHandler)
+        : nil;
+}
+
+/*
+ * NSURLRequest / NSMutableURLRequest
+ */
+
+static id hookRequestWithURL(id self, SEL _cmd, NSURL *url) {
+    observe_url(url, @"NSURLRequest.requestWithURL");
+
+    return g_forwardReqWithURL != NULL
+        ? g_forwardReqWithURL(self, _cmd, url)
+        : nil;
+}
+
+static id hookRequestInitURL(id self, SEL _cmd, NSURL *url) {
+    observe_url(url, @"NSURLRequest.initWithURL");
+
+    return g_forwardReqInitURL != NULL
+        ? g_forwardReqInitURL(self, _cmd, url)
+        : nil;
+}
+
+static id hookRequestInitURLPolicy(
+    id self, SEL _cmd, NSURL *url,
+    NSURLRequestCachePolicy policy,
+    NSTimeInterval timeout
+) {
+    observe_url(url, @"NSURLRequest.initWithURL:policy");
+
+    return g_forwardReqInitURLPolicy != NULL
+        ? g_forwardReqInitURLPolicy(self, _cmd, url, policy, timeout)
+        : nil;
+}
+
+static void hookSetURL(id self, SEL _cmd, NSURL *url) {
+    observe_url(url, @"NSMutableURLRequest.setURL");
+
+    if (g_forwardSetURL != NULL) {
+        g_forwardSetURL(self, _cmd, url);
+    }
+}
+
+/*
+ * NSURL constructors
+ */
+
+static NSURL *hookURLWithString(id self, SEL _cmd, NSString *string) {
+    NSURL *url = g_forwardURLWithString != NULL
+        ? g_forwardURLWithString(self, _cmd, string)
+        : nil;
+
+    observe_url(url, @"NSURL.URLWithString");
+    return url;
+}
+
+static NSURL *hookURLWithStringRelative(
+    id self, SEL _cmd,
+    NSString *string,
+    NSURL *baseURL
+) {
+    NSURL *url = g_forwardURLWithStringRelative != NULL
+        ? g_forwardURLWithStringRelative(self, _cmd, string, baseURL)
+        : nil;
+
+    observe_url(url, @"NSURL.URLWithString:relative");
+    return url;
+}
+
+static NSURL *hookURLWithStringEncoding(
+    id self, SEL _cmd,
+    NSString *string,
+    BOOL encodingInvalidCharacters
+) {
+    NSURL *url = g_forwardURLWithStringEncoding != NULL
+        ? g_forwardURLWithStringEncoding(
+            self, _cmd, string, encodingInvalidCharacters)
+        : nil;
+
+    observe_url(url, @"NSURL.URLWithString:encoding");
+    return url;
+}
+
+static void install_instance(
+    Class cls,
+    NSString *selectorName,
+    IMP replacement,
+    IMP *forward
+) {
+    Method method = class_getInstanceMethod(cls, NSSelectorFromString(selectorName));
+
     if (method == NULL) {
-        NSLog(@"[LLLLOffline][OBSERVE] missing %@", selectorName);
+        NSLog(@"[LLLLOffline][OBSERVE] MISSING instance %@", selectorName);
         return;
     }
 
     IMP current = method_getImplementation(method);
+
     if (current == replacement) {
         return;
     }
 
-    if (originalOut != NULL) {
-        *originalOut = current;
+    /*
+     * Always forward to whatever implementation is current at the time we
+     * install. This lets us sit in front of the existing ApiHook swizzles.
+     */
+    if (forward != NULL) {
+        *forward = current;
     }
 
     method_setImplementation(method, replacement);
 
-    NSLog(@"[LLLLOffline][OBSERVE] installed %@ current=%p replacement=%p",
-          selectorName,
-          current,
-          replacement);
+    NSLog(@"[LLLLOffline][OBSERVE] INSTALLED instance %@ current=%p replacement=%p",
+          selectorName, current, replacement);
 }
 
-static NSURLSessionDataTask *hook_dataTaskWithURL(id self, SEL _cmd, NSURL *url) {
-    observe_api_url(url, @"dataTaskWithURL");
-
-    return g_origDataTaskURL != NULL
-        ? g_origDataTaskURL(self, _cmd, url)
-        : nil;
-}
-
-static NSURLSessionDataTask *hook_dataTaskWithURL_block(
-    id self,
-    SEL _cmd,
-    NSURL *url,
-    void (^completionHandler)(NSData *, NSURLResponse *, NSError *)
+static void install_class(
+    Class cls,
+    NSString *selectorName,
+    IMP replacement,
+    IMP *forward
 ) {
-    observe_api_url(url, @"dataTaskWithURL:block");
+    Method method = class_getClassMethod(cls, NSSelectorFromString(selectorName));
 
-    return g_origDataTaskURLBlock != NULL
-        ? g_origDataTaskURLBlock(self, _cmd, url, completionHandler)
-        : nil;
-}
-
-static NSURLSessionDataTask *hook_dataTaskWithRequest(id self,
-                                                      SEL _cmd,
-                                                      NSURLRequest *request) {
-    observe_api_url(request.URL, @"dataTaskWithRequest");
-
-    return g_origDataTaskRequest != NULL
-        ? g_origDataTaskRequest(self, _cmd, request)
-        : nil;
-}
-
-static NSURLSessionDataTask *hook_dataTaskWithRequest_block(
-    id self,
-    SEL _cmd,
-    NSURLRequest *request,
-    void (^completionHandler)(NSData *, NSURLResponse *, NSError *)
-) {
-    observe_api_url(request.URL, @"dataTaskWithRequest:block");
-
-    return g_origDataTaskRequestBlock != NULL
-        ? g_origDataTaskRequestBlock(self, _cmd, request, completionHandler)
-        : nil;
-}
-
-static void install_session_hooks(void) {
-    Class session = NSClassFromString(@"NSURLSession");
-    if (session == Nil) {
-        NSLog(@"[LLLLOffline][OBSERVE] NSURLSession class missing");
+    if (method == NULL) {
+        NSLog(@"[LLLLOffline][OBSERVE] MISSING class %@", selectorName);
         return;
     }
 
-    install_instance_hook_once(session,
-                               @"dataTaskWithURL:",
-                               (IMP)hook_dataTaskWithURL,
-                               (IMP *)&g_origDataTaskURL);
+    IMP current = method_getImplementation(method);
 
-    install_instance_hook_once(session,
-                               @"dataTaskWithURL:completionHandler:",
-                               (IMP)hook_dataTaskWithURL_block,
-                               (IMP *)&g_origDataTaskURLBlock);
+    if (current == replacement) {
+        return;
+    }
 
-    install_instance_hook_once(session,
-                               @"dataTaskWithRequest:",
-                               (IMP)hook_dataTaskWithRequest,
-                               (IMP *)&g_origDataTaskRequest);
+    if (forward != NULL) {
+        *forward = current;
+    }
 
-    install_instance_hook_once(session,
-                               @"dataTaskWithRequest:completionHandler:",
-                               (IMP)hook_dataTaskWithRequest_block,
-                               (IMP *)&g_origDataTaskRequestBlock);
+    method_setImplementation(method, replacement);
+
+    NSLog(@"[LLLLOffline][OBSERVE] INSTALLED class %@ current=%p replacement=%p",
+          selectorName, current, replacement);
+}
+
+static void install_all_hooks(void) {
+    Class session = NSClassFromString(@"NSURLSession");
+    Class request = NSClassFromString(@"NSURLRequest");
+    Class mutableRequest = NSClassFromString(@"NSMutableURLRequest");
+    Class url = NSClassFromString(@"NSURL");
+
+    if (session != Nil) {
+        install_instance(session,
+                         @"dataTaskWithURL:",
+                         (IMP)hookTaskURL,
+                         (IMP *)&g_forwardTaskURL);
+
+        install_instance(session,
+                         @"dataTaskWithURL:completionHandler:",
+                         (IMP)hookTaskURLBlock,
+                         (IMP *)&g_forwardTaskURLBlock);
+
+        install_instance(session,
+                         @"dataTaskWithRequest:",
+                         (IMP)hookTaskRequest,
+                         (IMP *)&g_forwardTaskRequest);
+
+        install_instance(session,
+                         @"dataTaskWithRequest:completionHandler:",
+                         (IMP)hookTaskRequestBlock,
+                         (IMP *)&g_forwardTaskRequestBlock);
+    }
+
+    if (request != Nil) {
+        install_class(request,
+                      @"requestWithURL:",
+                      (IMP)hookRequestWithURL,
+                      (IMP *)&g_forwardReqWithURL);
+
+        install_instance(request,
+                         @"initWithURL:",
+                         (IMP)hookRequestInitURL,
+                         (IMP *)&g_forwardReqInitURL);
+
+        install_instance(request,
+                         @"initWithURL:cachePolicy:timeoutInterval:",
+                         (IMP)hookRequestInitURLPolicy,
+                         (IMP *)&g_forwardReqInitURLPolicy);
+    }
+
+    if (mutableRequest != Nil) {
+        install_instance(mutableRequest,
+                         @"setURL:",
+                         (IMP)hookSetURL,
+                         (IMP *)&g_forwardSetURL);
+    }
+
+    if (url != Nil) {
+        install_class(url,
+                      @"URLWithString:",
+                      (IMP)hookURLWithString,
+                      (IMP *)&g_forwardURLWithString);
+
+        install_class(url,
+                      @"URLWithString:relativeToURL:",
+                      (IMP)hookURLWithStringRelative,
+                      (IMP *)&g_forwardURLWithStringRelative);
+
+        install_class(url,
+                      @"URLWithString:encodingInvalidCharacters:",
+                      (IMP)hookURLWithStringEncoding,
+                      (IMP *)&g_forwardURLWithStringEncoding);
+    }
 
     show_status(@"LLL NET OBSERVER READY", YES);
 }
 
-static void send_simple_response(int fd,
-                                 int status,
-                                 const char *reason,
-                                 const char *body) {
+/*
+ * Independent raw localhost test. This deliberately does not use
+ * NSURLSession, so our observation hooks cannot break the baseline.
+ */
+
+static void send_response(int fd, int status, const char *reason, const char *body) {
     size_t bodyLength = strlen(body);
 
     char response[512];
+
     int n = snprintf(
         response,
         sizeof(response),
@@ -245,7 +419,6 @@ static void *localhost_server_thread(void *unused) {
 
     int serverFD = socket(AF_INET, SOCK_STREAM, 0);
     if (serverFD < 0) {
-        NSLog(@"[LLLLOffline][OBSERVE] server socket failed: %s", strerror(errno));
         return NULL;
     }
 
@@ -259,21 +432,18 @@ static void *localhost_server_thread(void *unused) {
     address.sin_port = htons(17891);
 
     if (bind(serverFD, (struct sockaddr *)&address, sizeof(address)) != 0) {
-        NSLog(@"[LLLLOffline][OBSERVE] bind failed: %s", strerror(errno));
         close(serverFD);
         return NULL;
     }
 
     if (listen(serverFD, 8) != 0) {
-        NSLog(@"[LLLLOffline][OBSERVE] listen failed: %s", strerror(errno));
         close(serverFD);
         return NULL;
     }
 
-    NSLog(@"[LLLLOffline][OBSERVE] localhost server listening");
-
     for (;;) {
         int clientFD = accept(serverFD, NULL, NULL);
+
         if (clientFD < 0) {
             if (errno == EINTR) {
                 continue;
@@ -288,14 +458,14 @@ static void *localhost_server_thread(void *unused) {
             request[received] = '\\0';
 
             if (strncmp(request, "GET /test ", 10) == 0) {
-                send_simple_response(
+                send_response(
                     clientFD,
                     200,
                     "OK",
-                    "{\"offline\":true,\"service\":\"LLLLOffline-iOS-observer\"}"
+                    "{\"offline\":true,\"service\":\"LLLLOffline-iOS-observer-v3\"}"
                 );
             } else {
-                send_simple_response(
+                send_response(
                     clientFD,
                     404,
                     "Not Found",
@@ -311,8 +481,9 @@ static void *localhost_server_thread(void *unused) {
     return NULL;
 }
 
-static BOOL localhost_raw_self_test(void) {
+static BOOL localhost_self_test(void) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
+
     if (fd < 0) {
         return NO;
     }
@@ -338,6 +509,7 @@ static BOOL localhost_raw_self_test(void) {
 
     char response[2048];
     ssize_t received = recv(fd, response, sizeof(response) - 1, 0);
+
     close(fd);
 
     if (received <= 0) {
@@ -350,43 +522,34 @@ static BOOL localhost_raw_self_test(void) {
            strstr(response, "\"offline\":true") != NULL;
 }
 
-static void run_self_test(void) {
-    BOOL ok = localhost_raw_self_test();
-
-    NSLog(@"[LLLLOffline] localhost raw self-test: %@",
-          ok ? @"OK" : @"FAIL");
-
-    show_status(ok ? @"LLL LOCALHOST OK" : @"LLL LOCALHOST FAIL", ok);
-}
-
 static void start_once(void) {
     g_observeLock = [NSObject new];
 
     pthread_t serverThread;
     if (pthread_create(&serverThread, NULL, localhost_server_thread, NULL) == 0) {
         (void)pthread_detach(serverThread);
-    } else {
-        NSLog(@"[LLLLOffline][OBSERVE] pthread_create failed");
     }
 
     /*
-     * Give the already-loaded private ApiHook a chance to finish its
-     * constructor, then install our observer over the same NSURLSession
-     * methods. We do this only a small number of times; we never replace
-     * our saved original with our own replacement.
+     * ApiHook.dylib is loaded before this dylib in the current IPA.
+     * Installing after a short delay means our forwarding pointers normally
+     * point at ApiHook's existing swizzled implementations.
      */
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        install_session_hooks();
+        install_all_hooks();
     });
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        install_session_hooks();
-        run_self_test();
-    });
+        install_all_hooks();
 
-    NSLog(@"[LLLLOffline][OBSERVE] clean observer started");
+        BOOL ok = localhost_self_test();
+        NSLog(@"[LLLLOffline] localhost self-test: %@",
+              ok ? @"OK" : @"FAIL");
+
+        show_status(ok ? @"LLL LOCALHOST OK" : @"LLL LOCALHOST FAIL", ok);
+    });
 }
 
 void LLLStartLocalHTTPServer(void) {
