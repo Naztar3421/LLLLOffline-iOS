@@ -34,6 +34,11 @@ typedef void (*SetURLFn)(id, SEL, NSURL *);
 typedef NSURL *(*URLWithStringFn)(id, SEL, NSString *);
 typedef NSURL *(*URLWithStringRelativeFn)(id, SEL, NSString *, NSURL *);
 typedef NSURL *(*URLWithStringEncodingFn)(id, SEL, NSString *, BOOL);
+typedef NSURLSession *(*SessionWithConfigFn)(id, SEL, NSURLSessionConfiguration *);
+typedef NSURLSession *(*SessionWithConfigDelegateFn)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *);
+typedef id (*SessionInitWithConfigFn)(id, SEL, NSURLSessionConfiguration *);
+typedef id (*SessionInitWithConfigDelegateFn)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *);
+
 
 static TaskURLFn g_forwardTaskURL = NULL;
 static TaskURLBlockFn g_forwardTaskURLBlock = NULL;
@@ -53,6 +58,12 @@ static SetURLFn g_forwardSetURL = NULL;
 static URLWithStringFn g_forwardURLWithString = NULL;
 static URLWithStringRelativeFn g_forwardURLWithStringRelative = NULL;
 static URLWithStringEncodingFn g_forwardURLWithStringEncoding = NULL;
+static SessionWithConfigFn g_forwardSessionWithConfig = NULL;
+static SessionWithConfigDelegateFn g_forwardSessionWithConfigDelegate = NULL;
+static SessionInitWithConfigFn g_forwardSessionInitWithConfig = NULL;
+static SessionInitWithConfigDelegateFn g_forwardSessionInitWithConfigDelegate = NULL;
+static Class g_trackedSessionClass = Nil;
+
 
 static void show_status(NSString *status, BOOL success) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -227,6 +238,152 @@ static NSURLSessionDownloadTask *hookDownloadURLBlock(
         : nil;
 }
 
+static void install_tracked_session_instance_hooks(NSURLSession *session);
+
+static void observe_session(NSURLSession *session, NSString *source) {
+    if (session == nil) {
+        return;
+    }
+
+    Class cls = object_getClass(session);
+    NSString *className = NSStringFromClass(cls);
+
+    NSLog(@"[LLLLOffline][OBSERVE] SESSION %@ class=%@", source, className);
+
+    show_status(
+        [NSString stringWithFormat:@"LLL SESSION\n%@\n%@", source, className],
+        YES
+    );
+
+    install_tracked_session_instance_hooks(session);
+}
+
+static NSURLSession *hookSessionWithConfig(
+    id self, SEL _cmd, NSURLSessionConfiguration *configuration
+) {
+    NSURLSession *session = g_forwardSessionWithConfig != NULL
+        ? g_forwardSessionWithConfig(self, _cmd, configuration)
+        : nil;
+
+    observe_session(session, @"sessionWithConfiguration");
+    return session;
+}
+
+static NSURLSession *hookSessionWithConfigDelegate(
+    id self,
+    SEL _cmd,
+    NSURLSessionConfiguration *configuration,
+    id delegate,
+    NSOperationQueue *queue
+) {
+    NSURLSession *session = g_forwardSessionWithConfigDelegate != NULL
+        ? g_forwardSessionWithConfigDelegate(
+            self, _cmd, configuration, delegate, queue)
+        : nil;
+
+    observe_session(session, @"sessionWithConfiguration:delegate");
+    return session;
+}
+
+static id hookSessionInitWithConfig(
+    id self,
+    SEL _cmd,
+    NSURLSessionConfiguration *configuration
+) {
+    id session = g_forwardSessionInitWithConfig != NULL
+        ? g_forwardSessionInitWithConfig(self, _cmd, configuration)
+        : nil;
+
+    if ([session isKindOfClass:NSURLSession.class]) {
+        observe_session((NSURLSession *)session, @"initWithConfiguration");
+    }
+
+    return session;
+}
+
+static id hookSessionInitWithConfigDelegate(
+    id self,
+    SEL _cmd,
+    NSURLSessionConfiguration *configuration,
+    id delegate,
+    NSOperationQueue *queue
+) {
+    id session = g_forwardSessionInitWithConfigDelegate != NULL
+        ? g_forwardSessionInitWithConfigDelegate(
+            self, _cmd, configuration, delegate, queue)
+        : nil;
+
+    if ([session isKindOfClass:NSURLSession.class]) {
+        observe_session((NSURLSession *)session, @"initWithConfiguration:delegate");
+    }
+
+    return session;
+}
+
+static void install_tracked_session_instance_hooks(NSURLSession *session) {
+    if (session == nil) {
+        return;
+    }
+
+    Class cls = object_getClass(session);
+    if (cls == Nil) {
+        return;
+    }
+
+    if (g_trackedSessionClass == cls) {
+        return;
+    }
+
+    g_trackedSessionClass = cls;
+
+    NSLog(@"[LLLLOffline][OBSERVE] TRACK SESSION CLASS %@", NSStringFromClass(cls));
+
+    install_instance(cls,
+                     @"dataTaskWithURL:",
+                     (IMP)hookTaskURL,
+                     (IMP *)&g_forwardTaskURL);
+
+    install_instance(cls,
+                     @"dataTaskWithURL:completionHandler:",
+                     (IMP)hookTaskURLBlock,
+                     (IMP *)&g_forwardTaskURLBlock);
+
+    install_instance(cls,
+                     @"dataTaskWithRequest:",
+                     (IMP)hookTaskRequest,
+                     (IMP *)&g_forwardTaskRequest);
+
+    install_instance(cls,
+                     @"dataTaskWithRequest:completionHandler:",
+                     (IMP)hookTaskRequestBlock,
+                     (IMP *)&g_forwardTaskRequestBlock);
+
+    install_instance(cls,
+                     @"uploadTaskWithRequest:fromData:completionHandler:",
+                     (IMP)hookUploadRequestData,
+                     (IMP *)&g_forwardUploadRequestData);
+
+    install_instance(cls,
+                     @"uploadTaskWithRequest:fromFile:completionHandler:",
+                     (IMP)hookUploadRequestFile,
+                     (IMP *)&g_forwardUploadRequestFile);
+
+    install_instance(cls,
+                     @"uploadTaskWithStreamedRequest:",
+                     (IMP)hookUploadRequestStream,
+                     (IMP *)&g_forwardUploadRequestStream);
+
+    install_instance(cls,
+                     @"downloadTaskWithRequest:completionHandler:",
+                     (IMP)hookDownloadRequestBlock,
+                     (IMP *)&g_forwardDownloadRequestBlock);
+
+    install_instance(cls,
+                     @"downloadTaskWithURL:completionHandler:",
+                     (IMP)hookDownloadURLBlock,
+                     (IMP *)&g_forwardDownloadURLBlock);
+}
+
 /*
  * NSURLRequest / NSMutableURLRequest
  */
@@ -376,6 +533,31 @@ static void install_all_hooks(void) {
     Class url = NSClassFromString(@"NSURL");
 
     if (session != Nil) {
+        install_class(session,
+                      @"sessionWithConfiguration:",
+                      (IMP)hookSessionWithConfig,
+                      (IMP *)&g_forwardSessionWithConfig);
+
+        install_class(session,
+                      @"sessionWithConfiguration:delegate:delegateQueue:",
+                      (IMP)hookSessionWithConfigDelegate,
+                      (IMP *)&g_forwardSessionWithConfigDelegate);
+
+        install_instance(session,
+                         @"initWithConfiguration:",
+                         (IMP)hookSessionInitWithConfig,
+                         (IMP *)&g_forwardSessionInitWithConfig);
+
+        install_instance(session,
+                         @"initWithConfiguration:delegate:delegateQueue:",
+                         (IMP)hookSessionInitWithConfigDelegate,
+                         (IMP *)&g_forwardSessionInitWithConfigDelegate);
+
+        NSURLSession *shared = [NSURLSession sharedSession];
+        observe_session(shared, @"sharedSession");
+    }
+
+    if (session != Nil) {
         install_instance(session,
                          @"dataTaskWithURL:",
                          (IMP)hookTaskURL,
@@ -421,64 +603,7 @@ static void install_all_hooks(void) {
                          (IMP)hookDownloadURLBlock,
                          (IMP *)&g_forwardDownloadURLBlock);
 
-        /*
-         * NSURLSession uses concrete runtime classes (commonly __NSCFURLSession)
-         * for actual instances. Hook the class of a real shared session too.
-         */
-        NSURLSession *shared = [NSURLSession sharedSession];
-        Class concreteSession = object_getClass(shared);
-
-        if (concreteSession != Nil && concreteSession != session) {
-            NSLog(@"[LLLLOffline][OBSERVE] concrete NSURLSession class = %@", concreteSession);
-
-            install_instance(concreteSession,
-                             @"dataTaskWithURL:",
-                             (IMP)hookTaskURL,
-                             (IMP *)&g_forwardTaskURL);
-
-            install_instance(concreteSession,
-                             @"dataTaskWithURL:completionHandler:",
-                             (IMP)hookTaskURLBlock,
-                             (IMP *)&g_forwardTaskURLBlock);
-
-            install_instance(concreteSession,
-                             @"dataTaskWithRequest:",
-                             (IMP)hookTaskRequest,
-                             (IMP *)&g_forwardTaskRequest);
-
-            install_instance(concreteSession,
-                             @"dataTaskWithRequest:completionHandler:",
-                             (IMP)hookTaskRequestBlock,
-                             (IMP *)&g_forwardTaskRequestBlock);
-
-            install_instance(concreteSession,
-                             @"uploadTaskWithRequest:fromData:completionHandler:",
-                             (IMP)hookUploadRequestData,
-                             (IMP *)&g_forwardUploadRequestData);
-
-            install_instance(concreteSession,
-                             @"uploadTaskWithRequest:fromFile:completionHandler:",
-                             (IMP)hookUploadRequestFile,
-                             (IMP *)&g_forwardUploadRequestFile);
-
-            install_instance(concreteSession,
-                             @"uploadTaskWithStreamedRequest:",
-                             (IMP)hookUploadRequestStream,
-                             (IMP *)&g_forwardUploadRequestStream);
-
-            install_instance(concreteSession,
-                             @"downloadTaskWithRequest:completionHandler:",
-                             (IMP)hookDownloadRequestBlock,
-                             (IMP *)&g_forwardDownloadRequestBlock);
-
-            install_instance(concreteSession,
-                             @"downloadTaskWithURL:completionHandler:",
-                             (IMP)hookDownloadURLBlock,
-                             (IMP *)&g_forwardDownloadURLBlock);
-        }
-    }
-
-    if (request != Nil) {
+    } (request != Nil) {
         install_class(request,
                       @"requestWithURL:",
                       (IMP)hookRequestWithURL,
