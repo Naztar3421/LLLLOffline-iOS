@@ -224,9 +224,7 @@ static void send_http_response(int fd,
 
     [header appendFormat:@"Content-Length: %lu\r\n",
                          (unsigned long)body.length];
-    [header appendString:@"Connection: close
-
-"];
+    [header appendString:@"Connection: close\r\n\r\n"];
 
     NSData *headerData =
         [header dataUsingEncoding:NSUTF8StringEncoding];
