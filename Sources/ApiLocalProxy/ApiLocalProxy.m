@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -269,7 +270,36 @@ static void run_api_hook_rewrite_diagnostic(void) {
 }
 
 
-static void send_http_response(int fd,
+static BOOL send_all(int fd, const void *buffer, size_t length) {
+    const uint8_t *cursor = (const uint8_t *)buffer;
+    size_t remaining = length;
+
+    while (remaining > 0) {
+        ssize_t sent = send(fd, cursor, remaining, 0);
+
+        if (sent < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            NSLog(@"[LLLLOffline][API] send failed fd=%d errno=%d (%s)",
+                  fd, errno, strerror(errno));
+            return NO;
+        }
+
+        if (sent == 0) {
+            NSLog(@"[LLLLOffline][API] send returned 0 fd=%d", fd);
+            return NO;
+        }
+
+        cursor += (size_t)sent;
+        remaining -= (size_t)sent;
+    }
+
+    return YES;
+}
+
+static BOOL send_http_response(int fd,
                                NSInteger status,
                                NSString *reason,
                                NSData *body,
@@ -302,11 +332,16 @@ static void send_http_response(int fd,
     NSData *headerData =
         [header dataUsingEncoding:NSUTF8StringEncoding];
 
-    (void)send(fd, headerData.bytes, headerData.length, 0);
-
-    if (body.length > 0) {
-        (void)send(fd, body.bytes, body.length, 0);
+    if (!send_all(fd, headerData.bytes, headerData.length)) {
+        return NO;
     }
+
+    if (body.length > 0 &&
+        !send_all(fd, body.bytes, body.length)) {
+        return NO;
+    }
+
+    return YES;
 }
 
 static void send_json_error(int fd, NSInteger status, NSString *message) {
@@ -511,7 +546,7 @@ static void proxy_request(int clientFD,
 
     responseHeaders[@"X-LLL-API-LOCAL"] = @"1";
 
-    send_http_response(
+    BOOL forwardOK = send_http_response(
         clientFD,
         response.statusCode,
         @"Upstream",
@@ -522,17 +557,97 @@ static void proxy_request(int clientFD,
     NSString *diagEncoding = contentEncoding.length > 0 ? contentEncoding : @"none";
     NSString *diagType = contentType.length > 0 ? contentType : @"unknown";
     diag_set_event(
-        [NSString stringWithFormat:@"UPSTREAM %ld %@\\n%lu bytes; CE=%@; CT=%@",
+        [NSString stringWithFormat:@"UPSTREAM %ld %@\\n%lu bytes; CE=%@; CT=%@; FWD=%@",
          (long)response.statusCode,
          path,
          (unsigned long)responseData.length,
          diagEncoding,
-         diagType]
+         diagType,
+         forwardOK ? @"OK" : @"FAIL"]
     );
 
     NSLog(@"[LLLLOffline][API] PRIVATE -> GAME status=%ld bytes=%lu",
           (long)response.statusCode,
           (unsigned long)responseData.length);
+}
+
+static void handle_client(int clientFD) {
+    NSString *requestLine = nil;
+    NSDictionary<NSString *, NSString *> *headers = nil;
+
+    NSData *received =
+        read_request(clientFD, &requestLine, &headers);
+
+    if (received == nil || requestLine == nil || headers == nil) {
+        send_json_error(clientFD, 400, @"malformed_http");
+        close(clientFD);
+        return;
+    }
+
+    NSLog(@"[LLLLOffline][API] INBOUND %@", requestLine);
+
+    NSArray<NSString *> *parts =
+        [requestLine componentsSeparatedByString:@" "];
+
+    BOOL selfTestRequest =
+        parts.count >= 2 &&
+        [parts[0] isEqualToString:@"GET"] &&
+        [parts[1] isEqualToString:@"/__LLL_SELFTEST__"];
+
+    if (selfTestRequest) {
+        NSData *selfTestBody =
+            [@"LLL_SELFTEST_OK\n"
+             dataUsingEncoding:NSUTF8StringEncoding];
+
+        (void)send_http_response(
+            clientFD,
+            200,
+            @"OK",
+            selfTestBody,
+            @{@"Content-Type": @"text/plain; charset=utf-8"}
+        );
+
+        close(clientFD);
+        return;
+    }
+
+    NSUInteger headerEnd =
+        find_header_end(received.bytes, received.length);
+
+    if (headerEnd == NSNotFound ||
+        headerEnd > received.length) {
+        send_json_error(clientFD, 400, @"missing_headers");
+        close(clientFD);
+        return;
+    }
+
+    NSData *body =
+        headerEnd < received.length
+        ? [received subdataWithRange:
+               NSMakeRange(headerEnd,
+                           received.length - headerEnd)]
+        : [NSData data];
+
+    NSArray<NSString *> *requestParts =
+        [requestLine componentsSeparatedByString:@" "];
+
+    NSString *gamePath =
+        requestParts.count >= 2 ? requestParts[1] : @"/";
+
+    diag_record_game_hit(gamePath);
+    proxy_request(clientFD, requestLine, headers, body);
+    close(clientFD);
+}
+
+static void *client_thread(void *context) {
+    int clientFD = *(int *)context;
+    free(context);
+
+    @autoreleasepool {
+        handle_client(clientFD);
+    }
+
+    return NULL;
 }
 
 static void run_local_selftest(void) {
@@ -646,70 +761,30 @@ static void *server_thread(void *unused) {
             break;
         }
 
-        NSString *requestLine = nil;
-        NSDictionary<NSString *, NSString *> *headers = nil;
-
-        NSData *received =
-            read_request(clientFD, &requestLine, &headers);
-
-        if (received == nil || requestLine == nil || headers == nil) {
-            send_json_error(clientFD, 400, @"malformed_http");
+        int *clientArg = (int *)malloc(sizeof(int));
+        if (clientArg == NULL) {
             close(clientFD);
             continue;
         }
 
-        NSLog(@"[LLLLOffline][API] INBOUND %@", requestLine);
+        *clientArg = clientFD;
 
-        NSArray<NSString *> *parts =
-            [requestLine componentsSeparatedByString:@" "];
+        pthread_t worker;
+        int createResult = pthread_create(
+            &worker,
+            NULL,
+            client_thread,
+            clientArg
+        );
 
-        BOOL selfTestRequest =
-            parts.count >= 2 &&
-            [parts[0] isEqualToString:@"GET"] &&
-            [parts[1] isEqualToString:@"/__LLL_SELFTEST__"];
-
-        if (selfTestRequest) {
-            NSData *selfTestBody =
-                [@"LLL_SELFTEST_OK\n"
-                 dataUsingEncoding:NSUTF8StringEncoding];
-
-            send_http_response(
-                clientFD,
-                200,
-                @"OK",
-                selfTestBody,
-                @{@"Content-Type": @"text/plain; charset=utf-8"}
-            );
-
+        if (createResult != 0) {
+            NSLog(@"[LLLLOffline][API] pthread_create failed: %d", createResult);
             close(clientFD);
+            free(clientArg);
             continue;
         }
 
-        NSUInteger headerEnd =
-            find_header_end(received.bytes, received.length);
-
-        if (headerEnd == NSNotFound ||
-            headerEnd > received.length) {
-            send_json_error(clientFD, 400, @"missing_headers");
-            close(clientFD);
-            continue;
-        }
-
-        NSData *body =
-            headerEnd < received.length
-            ? [received subdataWithRange:
-                   NSMakeRange(headerEnd,
-                               received.length - headerEnd)]
-            : [NSData data];
-
-        NSArray<NSString *> *requestParts =
-            [requestLine componentsSeparatedByString:@" "];
-
-        NSString *gamePath =
-            requestParts.count >= 2 ? requestParts[1] : @"/";
-
-        proxy_request(clientFD, requestLine, headers, body);
-        close(clientFD);
+        pthread_detach(worker);
     }
 
     close(serverFD);
