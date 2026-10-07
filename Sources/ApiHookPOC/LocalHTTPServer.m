@@ -17,7 +17,7 @@ static NSString * const kLocalBase = @"http://127.0.0.1:17891";
 static NSString * const kPrivateBase = @"https://api-alfa-l4.hasu-link.club";
 static NSString * const kOfficialHost = @"api.link-like-lovelive.app";
 static NSString * const kPrivateHost = @"api-alfa-l4.hasu-link.club";
-static NSString * const kTargetPath = @"/v1/profile/get_info";
+static NSString * const kTargetPath = @"/v1/out/quest/live/get_quest_top";
 
 static _Thread_local BOOL g_proxyForwarding = NO;
 
