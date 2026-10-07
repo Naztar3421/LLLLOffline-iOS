@@ -59,7 +59,6 @@ jobs:
             -I Sources/ApiLocalProxy \
             Sources/ApiLocalProxy/Entry.m \
             Sources/ApiLocalProxy/ApiLocalProxy.m \
-            Sources/ApiHookPOC/fishhook.c \
             -framework Foundation \
             -framework UIKit \
             -o build/ApiLocalProxy.dylib
