@@ -45,8 +45,36 @@ jobs:
           xcrun otool -L build/LocalHTTPPOC.dylib
           file build/LocalHTTPPOC.dylib
 
-      - name: Upload dylib
+      - name: Build transparent local API proxy
+        run: |
+          set -euo pipefail
+          SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
+
+          clang \
+            -fblocks \
+            -arch arm64 \
+            -isysroot "$SDKROOT" \
+            -miphoneos-version-min=15.0 \
+            -dynamiclib \
+            -I Sources/ApiLocalProxy \
+            Sources/ApiLocalProxy/Entry.m \
+            Sources/ApiLocalProxy/ApiLocalProxy.m \
+            -framework Foundation \
+            -framework UIKit \
+            -o build/ApiLocalProxy.dylib
+
+          xcrun otool -hv build/ApiLocalProxy.dylib
+          xcrun otool -L build/ApiLocalProxy.dylib
+          file build/ApiLocalProxy.dylib
+
+      - name: Upload observer dylib
         uses: actions/upload-artifact@v4
         with:
           name: LocalHTTPPOC-dylib
           path: build/LocalHTTPPOC.dylib
+
+      - name: Upload API local proxy dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: ApiLocalProxy-dylib
+          path: build/ApiLocalProxy.dylib
