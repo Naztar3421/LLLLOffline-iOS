@@ -4,6 +4,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -264,6 +265,79 @@ static void observe_url(NSURL *url, NSString *source) {
     );
 }
 
+static BOOL is_asset_url(NSURL *url) {
+    return url != nil &&
+           [url.host.lowercaseString isEqualToString:@"assets.link-like-lovelive.app"];
+}
+
+static NSURL *local_url_for_asset(NSURL *originalURL) {
+    if (!is_asset_url(originalURL)) {
+        return nil;
+    }
+
+    NSString *path = originalURL.path.length > 0 ? originalURL.path : @"/";
+    if (originalURL.query.length > 0) {
+        path = [path stringByAppendingFormat:@"?%@", originalURL.query];
+    }
+
+    return [NSURL URLWithString:[@"http://127.0.0.1:17891" stringByAppendingString:path]];
+}
+
+static BOOL rewrite_asset_task_request(id task, NSURL *originalURL) {
+    NSURL *localURL = local_url_for_asset(originalURL);
+    if (localURL == nil) {
+        return NO;
+    }
+
+    NSURLRequest *currentRequest = nil;
+    if ([task respondsToSelector:@selector(currentRequest)]) {
+        currentRequest = [task currentRequest];
+    }
+
+    NSMutableURLRequest *replacementRequest =
+        currentRequest != nil
+        ? [currentRequest mutableCopy]
+        : [NSMutableURLRequest requestWithURL:originalURL];
+
+    replacementRequest.URL = localURL;
+
+    SEL setter = NSSelectorFromString(@"setCurrentRequest:");
+
+    if ([task respondsToSelector:setter]) {
+        typedef void (*SetCurrentRequestFn)(id, SEL, NSURLRequest *);
+        SetCurrentRequestFn fn = (SetCurrentRequestFn)objc_msgSend;
+        fn(task, setter, replacementRequest);
+
+        NSURLRequest *after = nil;
+        if ([task respondsToSelector:@selector(currentRequest)]) {
+            after = [task currentRequest];
+        }
+
+        BOOL success = after.URL != nil &&
+                       [after.URL.host.lowercaseString isEqualToString:@"127.0.0.1"];
+
+        NSLog(@"[LLLLOffline][ASSET] setCurrentRequest %@ -> %@ success=%@",
+              originalURL.absoluteString,
+              localURL.absoluteString,
+              success ? @"YES" : @"NO");
+
+        show_status(
+            success
+                ? @"LLL ASSET REWRITE\nlocalhost"
+                : @"LLL ASSET SETTER FAILED",
+            success
+        );
+
+        return success;
+    }
+
+    NSLog(@"[LLLLOffline][ASSET] no setCurrentRequest: on %@",
+          NSStringFromClass(object_getClass(task)));
+
+    show_status(@"LLL ASSET NO SETTER", NO);
+    return NO;
+}
+
 static void hookTaskResume(id self, SEL _cmd) {
     NSURL *url = nil;
 
@@ -275,6 +349,18 @@ static void hookTaskResume(id self, SEL _cmd) {
     if (url == nil && [self respondsToSelector:@selector(originalRequest)]) {
         NSURLRequest *request = [self originalRequest];
         url = request.URL;
+    }
+
+    if (is_asset_url(url)) {
+        BOOL rewritten = rewrite_asset_task_request(self, url);
+
+        if (rewritten) {
+            NSLog(@"[LLLLOffline][ASSET] redirecting %@ via localhost",
+                  url.absoluteString);
+        } else {
+            NSLog(@"[LLLLOffline][ASSET] could not rewrite %@",
+                  url.absoluteString);
+        }
     }
 
     if (url != nil) {
@@ -881,6 +967,47 @@ static void send_response(int fd, int status, const char *reason, const char *bo
     }
 }
 
+static void send_asset_redirect(int fd, const char *target) {
+    if (target == NULL || target[0] != '/') {
+        send_response(fd, 400, "Bad Request", "{\"error\":\"bad_asset_target\"}");
+        return;
+    }
+
+    char location[2048];
+    int locationLength = snprintf(
+        location,
+        sizeof(location),
+        "https://assets.link-like-lovelive.app%s",
+        target
+    );
+
+    if (locationLength <= 0 || (size_t)locationLength >= sizeof(location)) {
+        send_response(fd, 400, "Bad Request", "{\"error\":\"asset_target_too_long\"}");
+        return;
+    }
+
+    char response[3072];
+    int n = snprintf(
+        response,
+        sizeof(response),
+        "HTTP/1.1 302 Found\r\n"
+        "Location: %s\r\n"
+        "Cache-Control: no-store\r\n"
+        "X-LLL-Asset-POC: localhost\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        location
+    );
+
+    if (n > 0) {
+        (void)send(fd, response, (size_t)n, 0);
+    }
+
+    NSLog(@"[LLLLOffline][ASSET] localhost HIT -> %s", location);
+    show_status(@"LLL ASSET LOCAL HIT\n302 -> CDN", YES);
+}
+
 static void *localhost_server_thread(void *unused) {
     (void)unused;
 
@@ -929,15 +1056,26 @@ static void *localhost_server_thread(void *unused) {
                     clientFD,
                     200,
                     "OK",
-                    "{\"offline\":true,\"service\":\"LLLLOffline-iOS-observer-v5-session\"}"
+                    "{\"offline\":true,\"service\":\"LLLLOffline-iOS-asset-poc\"}"
                 );
             } else {
-                send_response(
-                    clientFD,
-                    404,
-                    "Not Found",
-                    "{\"error\":\"not_found\"}"
-                );
+                char method[16] = {0};
+                char target[2048] = {0};
+
+                int parsed = sscanf(request, "%15s %2047s", method, target);
+
+                if (parsed == 2 &&
+                    strcmp(method, "GET") == 0 &&
+                    strncmp(target, "/raw/", 5) == 0) {
+                    send_asset_redirect(clientFD, target);
+                } else {
+                    send_response(
+                        clientFD,
+                        404,
+                        "Not Found",
+                        "{\"error\":\"not_found\"}"
+                    );
+                }
             }
         }
 
