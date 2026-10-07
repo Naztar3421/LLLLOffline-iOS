@@ -1,4 +1,5 @@
 #import "LocalHTTPServer.h"
+#import "fishhook.h"
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -7,6 +8,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <netdb.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -15,6 +17,8 @@
 
 static NSObject *g_observeLock = nil;
 static unsigned long g_hitCount = 0;
+static void show_status(NSString *status, BOOL success);
+
 static unsigned long g_socketHitCount = 0;
 static int (*g_original_getaddrinfo)(const char *, const char *, const struct addrinfo *, struct addrinfo **) = NULL;
 static int (*g_original_connect)(int, const struct sockaddr *, socklen_t) = NULL;
