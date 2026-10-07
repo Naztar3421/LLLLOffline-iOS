@@ -36,6 +36,7 @@ jobs:
             -I Sources/ApiHookPOC \
             Sources/ApiHookPOC/Entry.m \
             Sources/ApiHookPOC/LocalHTTPServer.m \
+            Sources/ApiHookPOC/fishhook.c \
             -framework Foundation \
             -framework UIKit \
             -o build/LocalHTTPPOC.dylib
