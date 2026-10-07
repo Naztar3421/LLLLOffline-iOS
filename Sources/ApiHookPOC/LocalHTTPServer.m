@@ -451,8 +451,8 @@ static void *server_thread(void *unused) {
         if ([path isEqualToString:kTargetPath]) {
             forward_to_private_server(client_fd, requestLine, headers, body);
         } else if ([[requestLine componentsSeparatedByString:@" "] firstObject].length > 0 &&
-                   [[requestLine componentsSeparatedByString:@" "] firstObject]
-                       .caseInsensitiveCompare:@"GET"] == NSOrderedSame &&
+                   [[[requestLine componentsSeparatedByString:@" "] firstObject]
+                       caseInsensitiveCompare:@"GET"] == NSOrderedSame &&
                    [path isEqualToString:@"/test"]) {
             send_json(
                 client_fd,
