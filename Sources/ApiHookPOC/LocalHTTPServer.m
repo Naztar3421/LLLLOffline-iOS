@@ -275,6 +275,96 @@ static void install_all_observer_hooks(void) {
     NSLog(@"[LLLLOffline][OBSERVE] hook sweep complete installs=%lu", installs);
 }
 
+static void send_test_response(int fd) {
+    const char *body = "{\"offline\":true,\"service\":\"LLLLOffline-iOS-OBSERVER\"}";
+    char response[512];
+
+    int n = snprintf(
+        response,
+        sizeof(response),
+        "HTTP/1.1 200 OK\\r\\n"
+        "Content-Type: application/json; charset=utf-8\\r\\n"
+        "Content-Length: %zu\\r\\n"
+        "Connection: close\\r\\n"
+        "\\r\\n"
+        "%s",
+        strlen(body),
+        body
+    );
+
+    if (n > 0) {
+        (void)send(fd, response, (size_t)n, 0);
+    }
+}
+
+static void *server_thread(void *unused) {
+    (void)unused;
+
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        return NULL;
+    }
+
+    int reuse = 1;
+    (void)setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(17891);
+
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) != 0 ||
+        listen(server_fd, 8) != 0) {
+        close(server_fd);
+        return NULL;
+    }
+
+    NSLog(@"[LLLLOffline][OBSERVE] localhost server listening on 127.0.0.1:17891");
+
+    for (;;) {
+        int client_fd = accept(server_fd, NULL, NULL);
+        if (client_fd < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        char request[2048];
+        ssize_t received = recv(client_fd, request, sizeof(request) - 1, 0);
+
+        if (received > 0) {
+            request[received] = '\\0';
+
+            if (strncmp(request, "GET /test ", 10) == 0) {
+                send_test_response(client_fd);
+            } else {
+                const char *body = "{\"error\":\"not_found\"}";
+                char response[512];
+                int n = snprintf(
+                    response,
+                    sizeof(response),
+                    "HTTP/1.1 404 Not Found\\r\\n"
+                    "Content-Type: application/json; charset=utf-8\\r\\n"
+                    "Content-Length: %zu\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                    "%s",
+                    strlen(body),
+                    body
+                );
+                if (n > 0) {
+                    (void)send(client_fd, response, (size_t)n, 0);
+                }
+            }
+        }
+
+        close(client_fd);
+    }
+
+    close(server_fd);
+    return NULL;
+}
+
 static void run_self_test(void) {
     NSURL *url = [NSURL URLWithString:@"http://127.0.0.1:17891/test"];
 
@@ -299,6 +389,11 @@ static void run_self_test(void) {
 static void start_server_once(void) {
     g_observeLock = [NSObject new];
 
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, server_thread, NULL) == 0) {
+        (void)pthread_detach(thread);
+    }
+
     install_all_observer_hooks();
     show_status(@"LLL NET HOOK READY", YES);
 
@@ -316,10 +411,9 @@ static void start_server_once(void) {
 
     dispatch_resume(timer);
 
-    (void)timer;
-
     NSLog(@"[LLLLOffline][OBSERVE] API observer started");
 }
+
 
 void LLLStartLocalHTTPServer(void) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
