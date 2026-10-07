@@ -23,7 +23,6 @@ jobs:
         run: |
           set -euo pipefail
           SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
-          SDK_PLATFORM="$(xcrun --sdk iphoneos --show-sdk-platform-path)"
           mkdir -p build
 
           clang \
@@ -37,8 +36,8 @@ jobs:
             -framework Foundation \
             -o build/ApiHook.dylib
 
-          "${SDK_PLATFORM}/usr/bin/otool" -hv build/ApiHook.dylib
-          "${SDK_PLATFORM}/usr/bin/otool" -L build/ApiHook.dylib
+          xcrun otool -hv build/ApiHook.dylib
+          xcrun otool -L build/ApiHook.dylib
           file build/ApiHook.dylib
 
       - name: Upload dylib
