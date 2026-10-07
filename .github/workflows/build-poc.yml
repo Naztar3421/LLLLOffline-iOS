@@ -36,14 +36,15 @@ jobs:
             Sources/ApiHookPOC/Entry.m \
             Sources/ApiHookPOC/LocalHTTPServer.m \
             -framework Foundation \
-            -o build/ApiHook.dylib
+            -framework UIKit \
+            -o build/LocalHTTPPOC.dylib
 
-          xcrun otool -hv build/ApiHook.dylib
-          xcrun otool -L build/ApiHook.dylib
-          file build/ApiHook.dylib
+          xcrun otool -hv build/LocalHTTPPOC.dylib
+          xcrun otool -L build/LocalHTTPPOC.dylib
+          file build/LocalHTTPPOC.dylib
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
-          name: ApiHook-dylib-poc
-          path: build/ApiHook.dylib
+          name: LocalHTTPPOC-dylib
+          path: build/LocalHTTPPOC.dylib
