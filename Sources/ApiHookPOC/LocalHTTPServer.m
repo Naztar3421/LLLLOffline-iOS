@@ -1,5 +1,8 @@
 #import "LocalHTTPServer.h"
 
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -8,6 +11,39 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+static void show_status(NSString *status, BOOL success) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        static UIWindow *window = nil;
+
+        if (window == nil) {
+            window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+            window.windowLevel = UIWindowLevelAlert + 1;
+            UIViewController *viewController = [UIViewController new];
+            viewController.view.backgroundColor = UIColor.clearColor;
+            window.rootViewController = viewController;
+        }
+
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(24, 48, 300, 48)];
+        label.text = status;
+        label.textAlignment = NSTextAlignmentCenter;
+        label.font = [UIFont boldSystemFontOfSize:18.0];
+        label.textColor = UIColor.whiteColor;
+        label.backgroundColor = success
+            ? [UIColor colorWithRed:0.1 green:0.6 blue:0.2 alpha:0.92]
+            : [UIColor colorWithRed:0.75 green:0.1 blue:0.1 alpha:0.92];
+        label.layer.cornerRadius = 10.0;
+        label.clipsToBounds = YES;
+        [window.rootViewController.view addSubview:label];
+        window.hidden = NO;
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [label removeFromSuperview];
+            window.hidden = YES;
+        });
+    });
+}
 
 static void send_response(int fd, int status, const char *status_text, const char *body) {
     char response[1024];
@@ -63,9 +99,7 @@ static void *server_thread(void *unused) {
     for (;;) {
         const int client_fd = accept(server_fd, NULL, NULL);
         if (client_fd < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
+            if (errno == EINTR) continue;
             break;
         }
 
@@ -99,6 +133,27 @@ static void *server_thread(void *unused) {
     return NULL;
 }
 
+static void run_self_test(void) {
+    NSURL *url = [NSURL URLWithString:@"http://127.0.0.1:17891/test"];
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+        dataTaskWithURL:url
+        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            BOOL ok = NO;
+
+            if (error == nil && [response isKindOfClass:NSHTTPURLResponse.class]) {
+                NSInteger status = [(NSHTTPURLResponse *)response statusCode];
+                NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                ok = status == 200 && [body containsString:@"\"offline\":true"];
+            }
+
+            NSLog(@"[LLLLOffline] localhost self-test: %@", ok ? @"OK" : @"FAIL");
+            show_status(ok ? @"LLL LOCALHOST OK" : @"LLL LOCALHOST FAIL", ok);
+        }];
+
+    [task resume];
+}
+
 static void start_server_once(void) {
     pthread_t thread;
 
@@ -110,4 +165,9 @@ static void start_server_once(void) {
 void LLLStartLocalHTTPServer(void) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
     (void)pthread_once(&once, start_server_once);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        run_self_test();
+    });
 }
