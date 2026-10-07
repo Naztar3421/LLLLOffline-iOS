@@ -28,6 +28,7 @@ jobs:
           mkdir -p build
 
           clang \
+            -fblocks \
             -arch arm64 \
             -isysroot "$SDKROOT" \
             -miphoneos-version-min=15.0 \
