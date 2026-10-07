@@ -38,6 +38,8 @@ typedef NSURLSession *(*SessionWithConfigFn)(id, SEL, NSURLSessionConfiguration 
 typedef NSURLSession *(*SessionWithConfigDelegateFn)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *);
 typedef id (*SessionInitWithConfigFn)(id, SEL, NSURLSessionConfiguration *);
 typedef id (*SessionInitWithConfigDelegateFn)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *);
+typedef void (*TaskResumeFn)(id, SEL);
+
 
 
 static TaskURLFn g_forwardTaskURL = NULL;
@@ -62,6 +64,8 @@ static SessionWithConfigFn g_forwardSessionWithConfig = NULL;
 static SessionWithConfigDelegateFn g_forwardSessionWithConfigDelegate = NULL;
 static SessionInitWithConfigFn g_forwardSessionInitWithConfig = NULL;
 static SessionInitWithConfigDelegateFn g_forwardSessionInitWithConfigDelegate = NULL;
+static TaskResumeFn g_forwardTaskResume = NULL;
+
 
 
 static void show_status(NSString *status, BOOL success) {
@@ -146,6 +150,32 @@ static void observe_url(NSURL *url, NSString *source) {
         [NSString stringWithFormat:@"LLL URL HIT #%lu\n%@\n%@", count, source, shown],
         YES
     );
+}
+
+static void hookTaskResume(id self, SEL _cmd) {
+    NSURL *url = nil;
+
+    if ([self respondsToSelector:@selector(currentRequest)]) {
+        NSURLRequest *request = [self currentRequest];
+        url = request.URL;
+    }
+
+    if (url == nil && [self respondsToSelector:@selector(originalRequest)]) {
+        NSURLRequest *request = [self originalRequest];
+        url = request.URL;
+    }
+
+    if (url != nil) {
+        NSString *path = compactURL(url);
+        show_status([NSString stringWithFormat:@"LLL TASK RESUME\n%@", path], YES);
+        NSLog(@"[LLLLOffline][OBSERVE] TASK RESUME %@", url.absoluteString);
+    } else {
+        show_status(@"LLL TASK RESUME\n<no URL>", YES);
+    }
+
+    if (g_forwardTaskResume != NULL) {
+        g_forwardTaskResume(self, _cmd);
+    }
 }
 
 /*
@@ -552,6 +582,15 @@ static void install_all_hooks(void) {
     Class request = NSClassFromString(@"NSURLRequest");
     Class mutableRequest = NSClassFromString(@"NSMutableURLRequest");
     Class url = NSClassFromString(@"NSURL");
+
+    Class task = NSClassFromString(@"NSURLSessionTask");
+
+    if (task != Nil) {
+        install_instance(task,
+                         @"resume",
+                         (IMP)hookTaskResume,
+                         (IMP *)&g_forwardTaskResume);
+    }
 
     if (session != Nil) {
         install_instance(session,
