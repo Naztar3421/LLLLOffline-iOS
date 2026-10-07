@@ -15,6 +15,114 @@
 
 static NSObject *g_observeLock = nil;
 static unsigned long g_hitCount = 0;
+static unsigned long g_socketHitCount = 0;
+static int (*g_original_getaddrinfo)(const char *, const char *, const struct addrinfo *, struct addrinfo **) = NULL;
+static int (*g_original_connect)(int, const struct sockaddr *, socklen_t) = NULL;
+
+
+static BOOL should_show_socket_host(const char *host) {
+    if (host == NULL || host[0] == '\0') {
+        return NO;
+    }
+
+    if (strcmp(host, "app.adjust.world") == 0 ||
+        strcmp(host, "cdn.cloud.unity3d.com") == 0) {
+        return NO;
+    }
+
+    return YES;
+}
+
+static void observe_socket_host(const char *host, const char *service, NSString *source) {
+    if (!should_show_socket_host(host)) {
+        return;
+    }
+
+    unsigned long count = 0;
+    @synchronized (g_observeLock) {
+        if (g_socketHitCount >= 20) {
+            return;
+        }
+        g_socketHitCount += 1;
+        count = g_socketHitCount;
+    }
+
+    NSString *hostString = [NSString stringWithUTF8String:host] ?: @"<unknown>";
+    NSString *serviceString = service ? ([NSString stringWithUTF8String:service] ?: @"") : @"";
+
+    show_status(
+        [NSString stringWithFormat:@"LLL SOCKET #%lu\n%@\n%@%@",
+         count,
+         source ?: @"network",
+         hostString,
+         serviceString.length ? [NSString stringWithFormat:@":%@", serviceString] : @""],
+        YES
+    );
+
+    NSLog(@"[LLLLOffline][SOCKET] #%lu %@ %s %s",
+          count,
+          source ?: @"network",
+          host,
+          service ?: "");
+}
+
+static int hook_getaddrinfo(
+    const char *nodeName,
+    const char *serviceName,
+    const struct addrinfo *hints,
+    struct addrinfo **result
+) {
+    observe_socket_host(nodeName, serviceName, @"getaddrinfo");
+
+    return g_original_getaddrinfo != NULL
+        ? g_original_getaddrinfo(nodeName, serviceName, hints, result)
+        : EAI_FAIL;
+}
+
+static int hook_connect(
+    int socketFD,
+    const struct sockaddr *address,
+    socklen_t addressLength
+) {
+    (void)addressLength;
+
+    char host[INET6_ADDRSTRLEN] = {0};
+    char service[16] = {0};
+
+    if (address != NULL) {
+        if (address->sa_family == AF_INET) {
+            const struct sockaddr_in *addr4 = (const struct sockaddr_in *)address;
+            if (addr4->sin_addr.s_addr != htonl(INADDR_LOOPBACK)) {
+                inet_ntop(AF_INET, &addr4->sin_addr, host, sizeof(host));
+                snprintf(service, sizeof(service), "%u", ntohs(addr4->sin_port));
+            }
+        } else if (address->sa_family == AF_INET6) {
+            const struct sockaddr_in6 *addr6 = (const struct sockaddr_in6 *)address;
+            if (!IN6_IS_ADDR_LOOPBACK(&addr6->sin6_addr)) {
+                inet_ntop(AF_INET6, &addr6->sin6_addr, host, sizeof(host));
+                snprintf(service, sizeof(service), "%u", ntohs(addr6->sin6_port));
+            }
+        }
+    }
+
+    if (host[0] != '\0') {
+        observe_socket_host(host, service, @"connect");
+    }
+
+    return g_original_connect != NULL
+        ? g_original_connect(socketFD, address, addressLength)
+        : -1;
+}
+
+static void install_low_level_network_hooks(void) {
+    struct rebinding rebindings[] = {
+        { "getaddrinfo", (void *)hook_getaddrinfo, (void **)&g_original_getaddrinfo },
+        { "connect", (void *)hook_connect, (void **)&g_original_connect }
+    };
+
+    int result = rebind_symbols(rebindings, sizeof(rebindings) / sizeof(rebindings[0]));
+    NSLog(@"[LLLLOffline][SOCKET] fishhook result=%d", result);
+}
 
 typedef NSURLSessionDataTask *(*TaskURLFn)(id, SEL, NSURL *);
 typedef NSURLSessionDataTask *(*TaskURLBlockFn)(id, SEL, NSURL *, void (^)(NSData *, NSURLResponse *, NSError *));
@@ -879,6 +987,8 @@ static BOOL localhost_self_test(void) {
 
 static void start_once(void) {
     g_observeLock = [NSObject new];
+
+    install_low_level_network_hooks();
 
     pthread_t serverThread;
     if (pthread_create(&serverThread, NULL, localhost_server_thread, NULL) == 0) {
