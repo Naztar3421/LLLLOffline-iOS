@@ -29,6 +29,7 @@ static void diag_refresh_main(void) {
     if (gDiagWindow == nil) {
         gDiagWindow = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
         gDiagWindow.windowLevel = UIWindowLevelAlert + 1;
+        gDiagWindow.userInteractionEnabled = NO;
 
         UIViewController *controller = [UIViewController new];
         controller.view.backgroundColor = UIColor.clearColor;
