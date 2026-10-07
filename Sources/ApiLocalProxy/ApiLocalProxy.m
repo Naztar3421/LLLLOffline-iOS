@@ -52,14 +52,14 @@ static void diag_refresh_main(void) {
 
     NSString *bind = gBindPass ? @"PASS" : @"WAIT";
     NSString *selfTest = gSelfTestPass ? @"PASS" : @"WAIT";
-    NSString *rewrite = gRewritePass ? @"PASS" : @"WAIT";
+    NSString *rewrite = gRewritePass ? @"N/A" : @"WAIT";
 
     gDiagLabel.text =
         [NSString stringWithFormat:
             @"LLL API LOCAL DIAGNOSTIC\n"
              @"BIND     %@   127.0.0.1:17891\n"
              @"SELFTEST %@   /__LLL_SELFTEST__\n"
-             @"REWRITE  %@   api.link-like-lovelive.app\n"
+             @"HOOK     %@   metadata → localhost\n"
              @"GAME HIT %lu\n"
              @"LAST     %@\n"
              @"EVENT    %@",
@@ -170,35 +170,22 @@ static NSDictionary<NSString *, NSString *> *parse_headers(NSString *headerText)
 }
 
 static BOOL is_hop_header(id key) {
-    if (key == nil) {
-        return NO;
-    }
-
-    if (![key isKindOfClass:NSString.class]) {
-        NSLog(@"[LLLLOffline][API] non-string header key class=%@ ptr=%p",
-              NSStringFromClass(object_getClass(key)),
+    if (key == nil || ![key isKindOfClass:NSString.class]) {
+        NSLog(@"[LLLLOffline][API] unexpected header-key object class=%@ ptr=%p",
+              key ? NSStringFromClass(object_getClass(key)) : @"<nil>",
               key);
         return NO;
     }
 
-    NSString *lower = [(NSString *)key lowercaseString];
+    NSString *value = (NSString *)key;
 
-    static NSSet<NSString *> *hopHeaders;
-    static dispatch_once_t onceToken;
-
-    dispatch_once(&onceToken, ^{
-        hopHeaders = [NSSet setWithArray:@[
-            @"connection",
-            @"proxy-connection",
-            @"keep-alive",
-            @"transfer-encoding",
-            @"upgrade",
-            @"host",
-            @"content-length"
-        ]];
-    });
-
-    return [hopHeaders containsObject:lower];
+    return [value caseInsensitiveCompare:@"connection"] == NSOrderedSame ||
+           [value caseInsensitiveCompare:@"proxy-connection"] == NSOrderedSame ||
+           [value caseInsensitiveCompare:@"keep-alive"] == NSOrderedSame ||
+           [value caseInsensitiveCompare:@"transfer-encoding"] == NSOrderedSame ||
+           [value caseInsensitiveCompare:@"upgrade"] == NSOrderedSame ||
+           [value caseInsensitiveCompare:@"host"] == NSOrderedSame ||
+           [value caseInsensitiveCompare:@"content-length"] == NSOrderedSame;
 }
 
 static NSData *read_request(int fd,
@@ -278,30 +265,9 @@ static BOOL is_localhost_target(NSURL *url) {
 }
 
 static void run_api_hook_rewrite_diagnostic(void) {
-    NSURL *original =
-        [NSURL URLWithString:@"https://api.link-like-lovelive.app/__LLL_REWRITE_TEST__"];
-
-    NSURLRequest *request =
-        [NSURLRequest requestWithURL:original];
-
-    NSURL *result = request.URL;
-    NSString *resultText = result.absoluteString ?: @"<nil>";
-
-    if (is_localhost_target(result)) {
-        diag_set_rewrite(YES, @"REWRITE PASS -> 127.0.0.1:17891");
-        NSLog(@"[LLLLOffline][DIAG] ApiHook rewrite PASS: %@ -> %@",
-              original.absoluteString,
-              resultText);
-    } else {
-        diag_set_rewrite(
-            NO,
-            [NSString stringWithFormat:@"REWRITE FAIL -> %@", resultText]
-        );
-        NSLog(@"[LLLLOffline][DIAG] ApiHook rewrite FAIL: %@ -> %@",
-              original.absoluteString,
-              resultText);
-    }
+    diag_set_rewrite(YES, @"HOOK TEST N/A - metadata redirect build");
 }
+
 
 static void send_http_response(int fd,
                                NSInteger status,
