@@ -1,4 +1,5 @@
 #import "ApiLocalProxy.h"
+#import "../ApiHookPOC/fishhook.h"
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -6,6 +7,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <netdb.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -17,6 +19,110 @@ static const uint16_t kLocalPort = 17891;
 static NSString * const kUpstreamBase = @"https://api-alfa-l4.hasu-link.club";
 
 static UIWindow *gDiagWindow = nil;
+static NSUInteger gNetworkHitCount = 0;
+static NSString *gLastNetwork = @"-";
+static int (*gOriginalGetaddrinfo)(const char *, const char *, const struct addrinfo *, struct addrinfo **) = NULL;
+static int (*gOriginalConnect)(int, const struct sockaddr *, socklen_t) = NULL;
+
+static BOOL is_ignored_network_host(const char *host) {
+    if (host == NULL || host[0] == '\0') {
+        return YES;
+    }
+
+    return strcmp(host, "app.adjust.world") == 0 ||
+           strcmp(host, "cdn.cloud.unity3d.com") == 0;
+}
+
+static void diag_record_network(NSString *text) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gNetworkHitCount += 1;
+        gLastNetwork = [text copy] ?: @"-";
+        gLastEvent = [NSString stringWithFormat:@"NETWORK %@", gLastNetwork];
+        diag_refresh_main();
+    });
+}
+
+static int lll_hook_getaddrinfo(
+    const char *nodeName,
+    const char *serviceName,
+    const struct addrinfo *hints,
+    struct addrinfo **result
+) {
+    if (!is_ignored_network_host(nodeName)) {
+        NSString *host = [NSString stringWithUTF8String:nodeName] ?: @"<unknown>";
+        NSString *service = serviceName
+            ? ([NSString stringWithUTF8String:serviceName] ?: @"")
+            : @"";
+        diag_record_network(
+            service.length > 0
+                ? [NSString stringWithFormat:@"DNS %@:%@", host, service]
+                : [NSString stringWithFormat:@"DNS %@", host]
+        );
+        NSLog(@"[LLLLOffline][NETWORK] getaddrinfo %@ %@", host, service);
+    }
+
+    return gOriginalGetaddrinfo != NULL
+        ? gOriginalGetaddrinfo(nodeName, serviceName, hints, result)
+        : EAI_FAIL;
+}
+
+static int lll_hook_connect(
+    int socketFD,
+    const struct sockaddr *address,
+    socklen_t addressLength
+) {
+    (void)socketFD;
+    (void)addressLength;
+
+    char host[INET6_ADDRSTRLEN] = {0};
+    char service[16] = {0};
+
+    if (address != NULL) {
+        if (address->sa_family == AF_INET) {
+            const struct sockaddr_in *a4 = (const struct sockaddr_in *)address;
+            if (!IN6_IS_ADDR_LOOPBACK((const struct in6_addr *)&a4->sin_addr) &&
+                a4->sin_addr.s_addr != htonl(INADDR_LOOPBACK)) {
+                inet_ntop(AF_INET, &a4->sin_addr, host, sizeof(host));
+                snprintf(service, sizeof(service), "%u", ntohs(a4->sin_port));
+            }
+        } else if (address->sa_family == AF_INET6) {
+            const struct sockaddr_in6 *a6 = (const struct sockaddr_in6 *)address;
+            if (!IN6_IS_ADDR_LOOPBACK(&a6->sin6_addr)) {
+                inet_ntop(AF_INET6, &a6->sin6_addr, host, sizeof(host));
+                snprintf(service, sizeof(service), "%u", ntohs(a6->sin6_port));
+            }
+        }
+    }
+
+    if (host[0] != '\0') {
+        NSString *ip = [NSString stringWithUTF8String:host] ?: @"<unknown>";
+        NSString *port = [NSString stringWithUTF8String:service] ?: @"";
+        diag_record_network(
+            port.length > 0
+                ? [NSString stringWithFormat:@"CONNECT %@:%@", ip, port]
+                : [NSString stringWithFormat:@"CONNECT %@", ip]
+        );
+        NSLog(@"[LLLLOffline][NETWORK] connect %s:%s", host, service);
+    }
+
+    return gOriginalConnect != NULL
+        ? gOriginalConnect(socketFD, address, addressLength)
+        : -1;
+}
+
+static void install_network_observer(void) {
+    struct rebinding rebindings[] = {
+        { "getaddrinfo", (void *)lll_hook_getaddrinfo, (void **)&gOriginalGetaddrinfo },
+        { "connect", (void *)lll_hook_connect, (void **)&gOriginalConnect }
+    };
+
+    int result = rebind_symbols(
+        rebindings,
+        sizeof(rebindings) / sizeof(rebindings[0])
+    );
+
+    NSLog(@"[LLLLOffline][NETWORK] fishhook result=%d", result);
+}
 static UILabel *gDiagLabel = nil;
 static BOOL gBindPass = NO;
 static BOOL gSelfTestPass = NO;
@@ -59,12 +165,15 @@ static void diag_refresh_main(void) {
              @"BIND     %@   127.0.0.1:17891\n"
              @"SELFTEST %@   /__LLL_SELFTEST__\n"
              @"REWRITE  %@   api.link-like-lovelive.app\n"
-             @"GAME HIT %lu\n"
+             @"GAME HIT %lu   NET %lu\n"
              @"LAST     %@\n"
+             @"NET      %@\n"
              @"EVENT    %@",
             bind, selfTest, rewrite,
             (unsigned long)gGameHitCount,
+            (unsigned long)gNetworkHitCount,
             gLastPath ?: @"-",
+            gLastNetwork ?: @"-",
             gLastEvent ?: @"-"];
 
     gDiagWindow.hidden = NO;
@@ -686,6 +795,8 @@ static void *server_thread(void *unused) {
 
 static void start_proxy_once(void) {
     pthread_t thread;
+
+    install_network_observer();
 
     if (pthread_create(&thread, NULL, server_thread, NULL) == 0) {
         (void)pthread_detach(thread);
