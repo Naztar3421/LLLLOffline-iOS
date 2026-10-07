@@ -1,0 +1,9 @@
+*.ipa
+*.zip
+*.dylib
+.DS_Store
+build/
+DerivedData/
+artifacts/
+private/
+account-export/
