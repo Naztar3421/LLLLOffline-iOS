@@ -1,6 +1,8 @@
 name: Build iOS localhost POC
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
