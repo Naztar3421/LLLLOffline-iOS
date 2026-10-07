@@ -16,8 +16,8 @@
 static NSString * const kOfficialHost = @"api.link-like-lovelive.app";
 static NSString * const kPrivateHost = @"api-alfa-l4.hasu-link.club";
 
-static _Atomic(unsigned long) g_apiCount = 0;
-static _Atomic(unsigned long) g_hookInstallCount = 0;
+static unsigned long g_apiCount = 0;
+static unsigned long g_hookInstallCount = 0;
 static NSString *g_lastAPIURL = nil;
 static NSObject *g_observeLock = nil;
 
@@ -103,11 +103,12 @@ static void observe_api_url(NSURL *url, NSString *source) {
         return;
     }
 
-    unsigned long count = __atomic_add_fetch(&g_apiCount, 1, __ATOMIC_RELAXED);
+    unsigned long count = 0;
     NSString *path = display_path_for_url(url);
-    NSString *line = [NSString stringWithFormat:@"#%lu %@", count, path];
 
     @synchronized (g_observeLock) {
+        g_apiCount += 1;
+        count = g_apiCount;
         g_lastAPIURL = url.absoluteString;
     }
 
@@ -138,7 +139,9 @@ static void install_instance_method_if_needed(
     }
 
     method_setImplementation(method, replacement);
-    __atomic_add_fetch(&g_hookInstallCount, 1, __ATOMIC_RELAXED);
+    @synchronized (g_observeLock) {
+        g_hookInstallCount += 1;
+    }
 
     NSLog(@"[LLLLOffline][OBSERVE] rehook instance %@ current=%p replacement=%p",
           selectorName, current, replacement);
@@ -271,7 +274,10 @@ static void install_all_observer_hooks(void) {
         install_class_method_if_needed(url, @"URLWithString:encodingInvalidCharacters:", (IMP)hook_URLWithStringEncoding, (IMP *)&g_origURLWithStringEncoding);
     }
 
-    unsigned long installs = __atomic_load_n(&g_hookInstallCount, __ATOMIC_RELAXED);
+    unsigned long installs = 0;
+    @synchronized (g_observeLock) {
+        installs = g_hookInstallCount;
+    }
     NSLog(@"[LLLLOffline][OBSERVE] hook sweep complete installs=%lu", installs);
 }
 
