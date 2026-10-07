@@ -82,7 +82,7 @@ static NSString *header_value(NSDictionary<NSString *, NSString *> *headers,
 static NSDictionary<NSString *, NSString *> *parse_headers(NSString *headerText) {
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
 
-    NSArray<NSString *> *lines = [headerText componentsSeparatedByString:@"\\r\\n"];
+    NSArray<NSString *> *lines = [headerText componentsSeparatedByString:@"\r\n"];
 
     for (NSUInteger i = 1; i < lines.count; i++) {
         NSString *line = lines[i];
@@ -158,7 +158,7 @@ static NSData *read_request(int fd,
             }
 
             NSArray<NSString *> *lines =
-                [headerText componentsSeparatedByString:@"\\r\\n"];
+                [headerText componentsSeparatedByString:@"\r\n"];
 
             *requestLineOut = lines.firstObject ?: @"";
             *headersOut = parse_headers(headerText);
@@ -206,7 +206,7 @@ static void send_http_response(int fd,
     }
 
     NSMutableString *header =
-        [NSMutableString stringWithFormat:@"HTTP/1.1 %ld %@\\r\\n",
+        [NSMutableString stringWithFormat:@"HTTP/1.1 %ld %@\r\n",
          (long)status,
          reason ?: @"OK"];
 
@@ -219,10 +219,10 @@ static void send_http_response(int fd,
             return;
         }
 
-        [header appendFormat:@"%@: %@\\r\\n", key, value];
+        [header appendFormat:@"%@: %@\r\n", key, value];
     }];
 
-    [header appendFormat:@"Content-Length: %lu\\r\\n",
+    [header appendFormat:@"Content-Length: %lu\r\n",
                          (unsigned long)body.length];
     [header appendString:@"Connection: close
 
