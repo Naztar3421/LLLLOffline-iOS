@@ -373,6 +373,11 @@ static NSMutableURLRequest *build_upstream_request(
         [request setValue:value forHTTPHeaderField:key];
     }];
 
+    // Ask the private server for an identity response so NSURLSession's
+    // transparent content decoding cannot leave us with a stale Content-Encoding
+    // header describing a body that has already been decoded.
+    [request setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
+
     return request;
 }
 
@@ -400,13 +405,18 @@ static void proxy_request(int clientFD,
 
     diag_record_game_hit(path);
 
-    NSLog(@"[LLLLOffline][API] LOCAL -> %@", upstream.URL.absoluteString);
+    NSLog(@"[LLLLOffline][API] LOCAL -> %@ method=%@ bytes=%lu",
+          upstream.URL.absoluteString,
+          upstream.HTTPMethod ?: @"<nil>",
+          (unsigned long)body.length);
 
     NSURLSessionConfiguration *configuration =
         [NSURLSessionConfiguration defaultSessionConfiguration];
 
     configuration.requestCachePolicy =
         NSURLRequestReloadIgnoringLocalCacheData;
+    configuration.HTTPShouldSetCookies = NO;
+    configuration.HTTPCookieAcceptPolicy = NSHTTPCookieAcceptPolicyNever;
 
     NSURLSession *session =
         [NSURLSession sessionWithConfiguration:configuration];
@@ -458,19 +468,46 @@ static void proxy_request(int clientFD,
 
     NSMutableDictionary *responseHeaders = [NSMutableDictionary dictionary];
 
+    __block NSString *contentType = nil;
+    __block NSString *contentEncoding = nil;
+    __block NSString *setCookieSummary = nil;
+
     [response.allHeaderFields enumerateKeysAndObjectsUsingBlock:
         ^(id key, id value, BOOL *stop) {
             (void)stop;
 
+            if (key == nil) {
+                return;
+            }
+
             NSString *keyString = [key description];
             NSString *valueString = [value description];
 
-            if (is_hop_header(keyString)) {
+            if ([keyString caseInsensitiveCompare:@"content-type"] == NSOrderedSame) {
+                contentType = valueString;
+            } else if ([keyString caseInsensitiveCompare:@"content-encoding"] == NSOrderedSame) {
+                contentEncoding = valueString;
+            } else if ([keyString caseInsensitiveCompare:@"set-cookie"] == NSOrderedSame) {
+                setCookieSummary = valueString;
+            }
+
+            // These are regenerated from the actual body/socket.
+            if ([keyString caseInsensitiveCompare:@"content-length"] == NSOrderedSame ||
+                [keyString caseInsensitiveCompare:@"transfer-encoding"] == NSOrderedSame ||
+                [keyString caseInsensitiveCompare:@"content-encoding"] == NSOrderedSame ||
+                is_hop_header(keyString)) {
                 return;
             }
 
             responseHeaders[keyString] = valueString;
         }];
+
+    // Preserve a single Set-Cookie header when Foundation exposes it as a
+    // scalar. Multiple Set-Cookie values may be collapsed by Foundation; the
+    // summary is still useful for diagnostics.
+    if (setCookieSummary.length > 0) {
+        responseHeaders[@"Set-Cookie"] = setCookieSummary;
+    }
 
     responseHeaders[@"X-LLL-API-LOCAL"] = @"1";
 
@@ -482,9 +519,15 @@ static void proxy_request(int clientFD,
         responseHeaders
     );
 
+    NSString *diagEncoding = contentEncoding.length > 0 ? contentEncoding : @"none";
+    NSString *diagType = contentType.length > 0 ? contentType : @"unknown";
     diag_set_event(
-        [NSString stringWithFormat:@"UPSTREAM %ld %@",
-         (long)response.statusCode, path]
+        [NSString stringWithFormat:@"UPSTREAM %ld %@\\n%lu bytes; CE=%@; CT=%@",
+         (long)response.statusCode,
+         path,
+         (unsigned long)responseData.length,
+         diagEncoding,
+         diagType]
     );
 
     NSLog(@"[LLLLOffline][API] PRIVATE -> GAME status=%ld bytes=%lu",
