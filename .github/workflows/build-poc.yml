@@ -1,0 +1,48 @@
+name: Build iOS localhost POC
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Select an installed Xcode
+        run: |
+          set -e
+          XCODE_APP="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -n 1)"
+          test -n "$XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Build arm64 iOS dylib
+        run: |
+          set -euo pipefail
+          SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
+          SDK_PLATFORM="$(xcrun --sdk iphoneos --show-sdk-platform-path)"
+          mkdir -p build
+
+          clang \
+            -arch arm64 \
+            -isysroot "$SDKROOT" \
+            -miphoneos-version-min=15.0 \
+            -dynamiclib \
+            -I Sources/ApiHookPOC \
+            Sources/ApiHookPOC/Entry.m \
+            Sources/ApiHookPOC/LocalHTTPServer.m \
+            -framework Foundation \
+            -o build/ApiHook.dylib
+
+          "${SDK_PLATFORM}/usr/bin/otool" -hv build/ApiHook.dylib
+          "${SDK_PLATFORM}/usr/bin/otool" -L build/ApiHook.dylib
+          file build/ApiHook.dylib
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: ApiHook-dylib-poc
+          path: build/ApiHook.dylib
