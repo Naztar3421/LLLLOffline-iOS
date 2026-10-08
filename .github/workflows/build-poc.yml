@@ -45,7 +45,7 @@ jobs:
           xcrun otool -L build/LocalHTTPPOC.dylib
           file build/LocalHTTPPOC.dylib
 
-      - name: Build transparent local API proxy (ARC lifetime fix)
+      - name: Build transparent local API proxy (ARC required)
         run: |
           set -euo pipefail
           SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
