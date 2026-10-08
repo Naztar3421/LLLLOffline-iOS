@@ -27,6 +27,12 @@ static BOOL gRewritePass = NO;
 static NSUInteger gGameHitCount = 0;
 static NSString *gLastPath = @"-";
 static NSString *gLastEvent = @"STARTING";
+static uint64_t gCaptureCount = 0;
+static uint64_t gCaptureWriteOK = 0;
+static uint64_t gCaptureWriteFail = 0;
+static uint64_t gLastCaptureID = 0;
+static NSString *gLastCapturePath = @"-";
+static BOOL gCaptureRootReady = NO;
 
 static void diag_refresh_main(void) {
     if (gDiagWindow == nil) {
@@ -40,7 +46,7 @@ static void diag_refresh_main(void) {
     }
 
     if (gDiagLabel == nil) {
-        gDiagLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 36, 359, 144)];
+        gDiagLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 36, 359, 176)];
         gDiagLabel.textAlignment = NSTextAlignmentLeft;
         gDiagLabel.numberOfLines = 0;
         gDiagLabel.font = [UIFont boldSystemFontOfSize:12.0];
@@ -62,12 +68,19 @@ static void diag_refresh_main(void) {
              @"BIND     %@   127.0.0.1:17891\n"
              @"SELFTEST %@   /__LLL_SELFTEST__\n"
              @"HOOK     %@   metadata → localhost\n"
-             @"GAME HIT %lu\n"
-             @"LAST     %@\n"
+             @"GAME HIT %lu   CAPTURE %llu\n"
+             @"WRITES   %llu OK / %llu FAIL\n"
+             @"ROOT     %@\n"
+             @"LAST     #%llu %@\n"
              @"EVENT    %@",
             bind, selfTest, rewrite,
             (unsigned long)gGameHitCount,
-            gLastPath ?: @"-",
+            (unsigned long long)gCaptureCount,
+            (unsigned long long)gCaptureWriteOK,
+            (unsigned long long)gCaptureWriteFail,
+            gCaptureRootReady ? @"OK" : @"FAIL",
+            (unsigned long long)gLastCaptureID,
+            gLastCapturePath ?: @"-",
             gLastEvent ?: @"-"];
 
     gDiagWindow.hidden = NO;
@@ -109,6 +122,36 @@ static void diag_record_game_hit(NSString *path) {
         gGameHitCount += 1;
         gLastPath = [path copy] ?: @"/";
         gLastEvent = [NSString stringWithFormat:@"GAME HIT %@", gLastPath];
+        diag_refresh_main();
+    });
+}
+
+static void diag_record_capture_start(uint64_t captureID, NSString *path) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gCaptureCount += 1;
+        gLastCaptureID = captureID;
+        gLastCapturePath = [path copy] ?: @"/";
+        gLastEvent = [NSString stringWithFormat:@"CAPTURE #%llu START %@",
+                       (unsigned long long)captureID,
+                       gLastCapturePath];
+        diag_refresh_main();
+    });
+}
+
+static void diag_record_capture_write(BOOL success) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (success) {
+            gCaptureWriteOK += 1;
+        } else {
+            gCaptureWriteFail += 1;
+        }
+        diag_refresh_main();
+    });
+}
+
+static void diag_record_capture_root(BOOL ready) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gCaptureRootReady = ready;
         diag_refresh_main();
     });
 }
@@ -445,17 +488,20 @@ static NSString *capture_file_path(uint64_t captureID,
     }
 
     NSError *directoryError = nil;
-    [[NSFileManager defaultManager]
+    BOOL created = [[NSFileManager defaultManager]
         createDirectoryAtPath:root
         withIntermediateDirectories:YES
         attributes:nil
         error:&directoryError];
 
-    if (directoryError != nil) {
+    if (!created && directoryError != nil) {
         NSLog(@"[LLLLOffline][CAPTURE] mkdir failed: %@",
               directoryError);
+        diag_record_capture_root(NO);
         return nil;
     }
+
+    diag_record_capture_root(YES);
 
     return [root stringByAppendingPathComponent:
         [NSString stringWithFormat:@"%06llu_%@",
@@ -468,6 +514,7 @@ static void capture_write_json(uint64_t captureID,
                                NSDictionary *object) {
     NSString *path = capture_file_path(captureID, suffix);
     if (path.length == 0) {
+        diag_record_capture_write(NO);
         return;
     }
 
@@ -477,10 +524,14 @@ static void capture_write_json(uint64_t captureID,
                                            error:nil];
 
     if (json == nil) {
+        diag_record_capture_write(NO);
         return;
     }
 
-    if (![json writeToFile:path atomically:YES]) {
+    BOOL ok = [json writeToFile:path atomically:YES];
+    diag_record_capture_write(ok);
+
+    if (!ok) {
         NSLog(@"[LLLLOffline][CAPTURE] JSON write failed: %@",
               path);
     }
@@ -491,10 +542,14 @@ static void capture_write_data(uint64_t captureID,
                                NSData *data) {
     NSString *path = capture_file_path(captureID, suffix);
     if (path.length == 0) {
+        diag_record_capture_write(NO);
         return;
     }
 
-    if (![(data ?: [NSData data]) writeToFile:path atomically:YES]) {
+    BOOL ok = [(data ?: [NSData data]) writeToFile:path atomically:YES];
+    diag_record_capture_write(ok);
+
+    if (!ok) {
         NSLog(@"[LLLLOffline][CAPTURE] data write failed: %@",
               path);
     }
@@ -513,6 +568,8 @@ static uint64_t capture_request(NSString *requestLine,
     if (parts.count >= 2) {
         path = parts[1] ?: @"/";
     }
+
+    diag_record_capture_start(captureID, path);
 
     capture_write_json(
         captureID,
@@ -555,14 +612,6 @@ static void proxy_request(int clientFD,
                           NSString *requestLine,
                           NSDictionary<NSString *, NSString *> *headers,
                           NSData *body) {
-    NSString *earlyPath = @"/";
-    NSArray<NSString *> *earlyParts =
-        [requestLine componentsSeparatedByString:@" "];
-    if (earlyParts.count >= 2) {
-        earlyPath = earlyParts[1] ?: @"/";
-    }
-    diag_record_game_hit(earlyPath);
-
     uint64_t captureID =
         capture_request(requestLine, headers, body);
 
@@ -584,8 +633,6 @@ static void proxy_request(int clientFD,
     }
 
     NSString *path = upstream.URL.path ?: @"/";
-
-    diag_record_game_hit(path);
 
     NSLog(@"[LLLLOffline][API] LOCAL -> %@ method=%@ bytes=%lu",
           upstream.URL.absoluteString,
@@ -963,6 +1010,25 @@ static void *server_thread(void *unused) {
 }
 
 static void start_proxy_once(void) {
+    NSString *root = capture_root_directory();
+
+    if (root.length > 0) {
+        NSError *error = nil;
+        BOOL ok = [[NSFileManager defaultManager]
+            createDirectoryAtPath:root
+            withIntermediateDirectories:YES
+            attributes:nil
+            error:&error];
+
+        diag_record_capture_root(ok || error == nil);
+
+        if (!ok && error != nil) {
+            NSLog(@"[LLLLOffline][CAPTURE] startup mkdir failed: %@", error);
+        }
+    } else {
+        diag_record_capture_root(NO);
+    }
+
     pthread_t thread;
 
     if (pthread_create(&thread, NULL, server_thread, NULL) == 0) {
