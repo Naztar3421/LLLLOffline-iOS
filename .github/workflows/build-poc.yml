@@ -45,13 +45,14 @@ jobs:
           xcrun otool -L build/LocalHTTPPOC.dylib
           file build/LocalHTTPPOC.dylib
 
-      - name: Build transparent local API proxy
+      - name: Build transparent local API proxy (ARC lifetime fix)
         run: |
           set -euo pipefail
           SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
 
           clang \
             -fblocks \
+            -fobjc-arc \
             -arch arm64 \
             -isysroot "$SDKROOT" \
             -miphoneos-version-min=15.0 \
@@ -61,11 +62,11 @@ jobs:
             Sources/ApiLocalProxy/ApiLocalProxy.m \
             -framework Foundation \
             -framework UIKit \
-            -o build/ApiLocalProxy.dylib
+            -o build/ApiLocalProxy-ARC.dylib
 
-          xcrun otool -hv build/ApiLocalProxy.dylib
-          xcrun otool -L build/ApiLocalProxy.dylib
-          file build/ApiLocalProxy.dylib
+          xcrun otool -hv build/ApiLocalProxy-ARC.dylib
+          xcrun otool -L build/ApiLocalProxy-ARC.dylib
+          file build/ApiLocalProxy-ARC.dylib
 
       - name: Upload observer dylib
         uses: actions/upload-artifact@v4
@@ -73,8 +74,8 @@ jobs:
           name: LocalHTTPPOC-dylib
           path: build/LocalHTTPPOC.dylib
 
-      - name: Upload API local proxy dylib
+      - name: Upload API local proxy dylib (ARC)
         uses: actions/upload-artifact@v4
         with:
-          name: ApiLocalProxy-dylib
-          path: build/ApiLocalProxy.dylib
+          name: ApiLocalProxy-ARC-dylib
+          path: build/ApiLocalProxy-ARC.dylib
