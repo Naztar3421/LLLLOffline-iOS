@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <stdint.h>
 
 static NSString * const kLocalHost = @"127.0.0.1";
 static const uint16_t kLocalPort = 17891;
@@ -416,6 +417,140 @@ static NSMutableURLRequest *build_upstream_request(
     return request;
 }
 
+static uint64_t gCaptureSequence = 0;
+
+static NSString *capture_root_directory(void) {
+    NSArray<NSString *> *paths =
+        NSSearchPathForDirectoriesInDomains(
+            NSDocumentDirectory,
+            NSUserDomainMask,
+            YES
+        );
+
+    NSString *documents =
+        paths.count > 0 ? paths[0] : nil;
+
+    if (documents.length == 0) {
+        return nil;
+    }
+
+    return [documents stringByAppendingPathComponent:@"LLLL_API_Capture"];
+}
+
+static NSString *capture_file_path(uint64_t captureID,
+                                   NSString *suffix) {
+    NSString *root = capture_root_directory();
+    if (root.length == 0) {
+        return nil;
+    }
+
+    NSError *directoryError = nil;
+    [[NSFileManager defaultManager]
+        createDirectoryAtPath:root
+        withIntermediateDirectories:YES
+        attributes:nil
+        error:&directoryError];
+
+    if (directoryError != nil) {
+        NSLog(@"[LLLLOffline][CAPTURE] mkdir failed: %@",
+              directoryError);
+        return nil;
+    }
+
+    return [root stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"%06llu_%@",
+         (unsigned long long)captureID,
+         suffix ?: @"data"]];
+}
+
+static void capture_write_json(uint64_t captureID,
+                               NSString *suffix,
+                               NSDictionary *object) {
+    NSString *path = capture_file_path(captureID, suffix);
+    if (path.length == 0) {
+        return;
+    }
+
+    NSData *json =
+        [NSJSONSerialization dataWithJSONObject:object ?: @{}
+                                         options:NSJSONWritingPrettyPrinted
+                                           error:nil];
+
+    if (json == nil) {
+        return;
+    }
+
+    if (![json writeToFile:path atomically:YES]) {
+        NSLog(@"[LLLLOffline][CAPTURE] JSON write failed: %@",
+              path);
+    }
+}
+
+static void capture_write_data(uint64_t captureID,
+                               NSString *suffix,
+                               NSData *data) {
+    NSString *path = capture_file_path(captureID, suffix);
+    if (path.length == 0) {
+        return;
+    }
+
+    if (![(data ?: [NSData data]) writeToFile:path atomically:YES]) {
+        NSLog(@"[LLLLOffline][CAPTURE] data write failed: %@",
+              path);
+    }
+}
+
+static uint64_t capture_request(NSString *requestLine,
+                                NSDictionary<NSString *, NSString *> *headers,
+                                NSData *body) {
+    uint64_t captureID =
+        __sync_add_and_fetch(&gCaptureSequence, 1);
+
+    NSString *path = @"/";
+    NSArray<NSString *> *parts =
+        [requestLine componentsSeparatedByString:@" "];
+
+    if (parts.count >= 2) {
+        path = parts[1] ?: @"/";
+    }
+
+    capture_write_json(
+        captureID,
+        @"request.json",
+        @{
+            @"capture_id": @(captureID),
+            @"request_line": requestLine ?: @"",
+            @"path": path ?: @"/",
+            @"headers": headers ?: @{},
+            @"request_bytes": @((unsigned long long)(body.length))
+        }
+    );
+
+    capture_write_data(captureID, @"request.bin", body);
+
+    return captureID;
+}
+
+static void capture_response(uint64_t captureID,
+                             NSHTTPURLResponse *response,
+                             NSData *body,
+                             NSDictionary<NSString *, NSString *> *headers,
+                             NSError *error) {
+    NSMutableDictionary *result = [@{
+        @"capture_id": @(captureID),
+        @"status": response ? @(response.statusCode) : [NSNull null],
+        @"headers": headers ?: @{},
+        @"response_bytes": @((unsigned long long)(body.length))
+    } mutableCopy];
+
+    if (error != nil) {
+        result[@"error"] = error.localizedDescription ?: @"unknown";
+    }
+
+    capture_write_json(captureID, @"response.json", result);
+    capture_write_data(captureID, @"response.bin", body);
+}
+
 static void proxy_request(int clientFD,
                           NSString *requestLine,
                           NSDictionary<NSString *, NSString *> *headers,
@@ -428,10 +563,22 @@ static void proxy_request(int clientFD,
     }
     diag_record_game_hit(earlyPath);
 
+    uint64_t captureID =
+        capture_request(requestLine, headers, body);
+
     NSMutableURLRequest *upstream =
         build_upstream_request(requestLine, headers, body);
 
     if (upstream == nil) {
+        capture_write_json(
+            captureID,
+            @"response.json",
+            @{
+                @"capture_id": @(captureID),
+                @"status": @400,
+                @"error": @"bad_request"
+            }
+        );
         send_json_error(clientFD, 400, @"bad_request");
         return;
     }
@@ -491,12 +638,28 @@ static void proxy_request(int clientFD,
 
     if (waitResult != 0) {
         [task cancel];
+        capture_write_json(
+            captureID,
+            @"response.json",
+            @{
+                @"capture_id": @(captureID),
+                @"status": @504,
+                @"error": @"upstream_timeout"
+            }
+        );
         send_json_error(clientFD, 504, @"upstream_timeout");
         return;
     }
 
     if (responseError != nil || response == nil) {
         NSLog(@"[LLLLOffline][API] upstream error: %@", responseError);
+        capture_response(
+            captureID,
+            response,
+            responseData,
+            @{},
+            responseError
+        );
         send_json_error(clientFD, 502, @"upstream_error");
         return;
     }
@@ -545,6 +708,14 @@ static void proxy_request(int clientFD,
     }
 
     responseHeaders[@"X-LLL-API-LOCAL"] = @"1";
+
+    capture_response(
+        captureID,
+        response,
+        responseData,
+        responseHeaders,
+        nil
+    );
 
     BOOL forwardOK = send_http_response(
         clientFD,
