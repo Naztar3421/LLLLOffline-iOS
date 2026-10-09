@@ -1018,6 +1018,7 @@ static void proxy_request(int clientFD,
     NSHTTPURLResponse *response = nil;
     NSError *responseError = nil;
     long waitResult = 0;
+    NSURLSessionDataTask *task = nil;
 
     if ([upstream.URL.scheme.lowercaseString isEqualToString:@"http"]) {
         NSInteger rawStatus = 0;
@@ -1056,7 +1057,7 @@ static void proxy_request(int clientFD,
         __block NSHTTPURLResponse *sessionResponse = nil;
         __block NSError *sessionError = nil;
 
-        NSURLSessionDataTask *task =
+        task =
             [session dataTaskWithRequest:upstream
                        completionHandler:^(NSData *data,
                                            NSURLResponse *urlResponse,
